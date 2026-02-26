@@ -50,8 +50,7 @@ def run_for_date(target_date: date, cfg: dict) -> None:
 
     # Pipelines for new sales (contracts)
     sales_pipeline_names = cfg.get("AMO_SALES_PIPELINE_NAMES", [
-        "Оффлайн",
-        "Offline",
+        "Новые продажи",
     ])
     sales_pipeline_ids = [
         pipeline_map[n] for n in sales_pipeline_names if n in pipeline_map
