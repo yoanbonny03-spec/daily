@@ -88,9 +88,20 @@ def load_config() -> dict:
         # Pipeline IDs for expires (fallback)
         "AMO_EXPIRES_PIPELINE_IDS": _json_list("AMO_EXPIRES_PIPELINE_IDS", default=[]),
 
-        # Won/closed status IDs — find via GET /api/v4/leads/pipelines
-        # These are the status IDs that count as "signed contract"
-        "AMO_WON_STATUS_IDS": _json_list("AMO_WON_STATUS_IDS", default=[]),
+        # ID поля "Дата заключения договора" — используется для фильтрации новых продаж
+        "AMO_CONTRACT_DATE_FIELD_ID": _require("AMO_CONTRACT_DATE_FIELD_ID"),
+
+        # Названия этапов сделки, которые считаются "договор подписан"
+        # Скрипт сам найдёт их ID по названию внутри воронки
+        "AMO_WON_STATUS_NAMES": _json_list("AMO_WON_STATUS_NAMES", default=[
+            "ПРЕДОПЛАТА получена №1",
+            "СЧЕТ НА ОПЛАТУ ДЛЯ ПРЕДОПЛАТЫ №2",
+            "ПРЕДОПЛАТА ПОЛУЧЕНА №2",
+            "Счет на оплату для полной оплаты",
+            "ПОЛНАЯ ОПЛАТА ПОЛУЧЕНА",
+            "Реализован в HH",
+            "Успешно реализовано",
+        ]),
 
         # Filter values
         "CITY_VALUE": _optional("CITY_VALUE", "Астана"),

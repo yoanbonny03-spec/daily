@@ -76,9 +76,12 @@ def run_for_date(target_date: date, cfg: dict) -> None:
     city_field_id = int(cfg["AMO_CITY_FIELD_ID"])
     dept_field_id = int(cfg["AMO_DEPARTMENT_FIELD_ID"])
     end_date_field_id = int(cfg["AMO_END_DATE_FIELD_ID"])
+    contract_date_field_id = int(cfg["AMO_CONTRACT_DATE_FIELD_ID"])
 
-    # Won status IDs (список ID статусов "Сделка завершена / Договор подписан")
-    won_status_ids = [int(x) for x in cfg.get("AMO_WON_STATUS_IDS", [])]
+    # Resolve won status names → IDs within the sales pipelines
+    won_status_names = cfg.get("AMO_WON_STATUS_NAMES", [])
+    won_status_ids = amo.get_won_status_ids(sales_pipeline_ids, won_status_names)
+    logger.debug("Won status IDs resolved: %s", won_status_ids)
 
     # 1. New sales purch 1d-3d (col R) + New sales purch total (col S)
     new_sales_1d3d, new_sales_total = amo.count_new_sales(
@@ -86,6 +89,7 @@ def run_for_date(target_date: date, cfg: dict) -> None:
         city_field_id=city_field_id,
         department_field_id=dept_field_id,
         pipeline_ids=sales_pipeline_ids,
+        contract_date_field_id=contract_date_field_id,
         won_status_ids=won_status_ids,
         city_value=cfg.get("CITY_VALUE", "Астана"),
         department_value=cfg.get("DEPARTMENT_VALUE", "Оффлайн"),

@@ -126,10 +126,11 @@ class AmoCRMClient:
         date_from: int,
         date_to: int,
         pipeline_ids: list[int] = None,
+        status_ids: list[int] = None,
     ) -> list:
         """
         Fetch leads where a custom date field is within [date_from, date_to].
-        Used for 'Expires' (end_of_classes date).
+        Used for 'Expires' (end_of_classes date) and new sales (contract date).
         """
         params: dict = {
             f"filter[custom_fields_values][{field_id}][from]": date_from,
@@ -138,8 +139,23 @@ class AmoCRMClient:
         if pipeline_ids:
             for i, pid in enumerate(pipeline_ids):
                 params[f"filter[pipeline_id][{i}]"] = pid
+        if status_ids:
+            for i, sid in enumerate(status_ids):
+                params[f"filter[statuses][{i}][status_id]"] = sid
 
         return self._paginate("/leads", params)
+
+    def get_won_status_ids(self, pipeline_ids: list[int], status_names: list[str]) -> list[int]:
+        """Return status IDs whose names match status_names within the given pipelines."""
+        names_set = set(status_names)
+        result = []
+        for p in self.get_pipelines():
+            if pipeline_ids and p["id"] not in pipeline_ids:
+                continue
+            for s in p.get("_embedded", {}).get("statuses", []):
+                if s["name"] in names_set:
+                    result.append(s["id"])
+        return result
 
     # ------------------------------------------------------------------
     # Business logic helpers
@@ -160,23 +176,25 @@ class AmoCRMClient:
         city_field_id: int,
         department_field_id: int,
         pipeline_ids: list[int],
+        contract_date_field_id: int,
         won_status_ids: list[int],
         city_value: str = "Астана",
         department_value: str = "Оффлайн",
     ) -> tuple[int, int]:
         """
-        Returns (count_1d_3d, count_total) for leads won on target_date
-        matching city=Астана, department=Оффлайн.
+        Returns (count_1d_3d, count_total) for leads where contract_date = target_date,
+        matching city and department filters.
 
-        count_1d_3d: deals where (closed_at - created_at) <= 3 days
+        count_1d_3d: deals where (target_date - created_at) <= 3 days
         count_total: all deals matching filters
         """
         day_start = int(datetime.combine(target_date, datetime.min.time()).timestamp())
         day_end = int(datetime.combine(target_date, datetime.max.time()).timestamp())
 
-        leads = self.get_leads(
-            closed_at_from=day_start,
-            closed_at_to=day_end,
+        leads = self.get_leads_by_date_field(
+            field_id=contract_date_field_id,
+            date_from=day_start,
+            date_to=day_end,
             pipeline_ids=pipeline_ids,
             status_ids=won_status_ids,
         )
@@ -195,9 +213,8 @@ class AmoCRMClient:
             count_total += 1
 
             created_at = lead.get("created_at")
-            closed_at = lead.get("closed_at")
-            if created_at and closed_at:
-                delta = datetime.fromtimestamp(closed_at) - datetime.fromtimestamp(created_at)
+            if created_at:
+                delta = target_date - datetime.fromtimestamp(created_at).date()
                 if delta <= threshold:
                     count_1d_3d += 1
 
