@@ -6,6 +6,9 @@ import logging
 from datetime import date
 from typing import Optional
 
+import json
+import os
+
 import gspread
 from gspread.exceptions import WorksheetNotFound
 from google.oauth2.service_account import Credentials
@@ -44,8 +47,14 @@ NON_EMPLOYEE_SHEETS = {
 class SheetsClient:
     """Thin wrapper around gspread for our specific use-cases."""
 
-    def __init__(self, service_account_file: str):
-        creds = Credentials.from_service_account_file(service_account_file, scopes=SCOPES)
+    def __init__(self, service_account_file: str = None):
+        # Railway / cloud: credentials passed as JSON string in env var
+        sa_json = os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON")
+        if sa_json:
+            info = json.loads(sa_json)
+            creds = Credentials.from_service_account_info(info, scopes=SCOPES)
+        else:
+            creds = Credentials.from_service_account_file(service_account_file, scopes=SCOPES)
         self.gc = gspread.authorize(creds)
 
     # ------------------------------------------------------------------

@@ -97,8 +97,9 @@ def load_config() -> dict:
         "DEPARTMENT_VALUE": _optional("DEPARTMENT_VALUE", "Оффлайн"),
 
         # ---- Google Sheets ----
-        # Path to service account JSON credentials file
-        "GOOGLE_SERVICE_ACCOUNT_FILE": _require("GOOGLE_SERVICE_ACCOUNT_FILE"),
+        # Either GOOGLE_SERVICE_ACCOUNT_JSON (for Railway/cloud) OR
+        # GOOGLE_SERVICE_ACCOUNT_FILE (path to local JSON file) must be set.
+        "GOOGLE_SERVICE_ACCOUNT_FILE": _optional("GOOGLE_SERVICE_ACCOUNT_FILE"),
 
         # Spreadsheet ID for the payments/employee sheets
         # (the one with employee sheets and "План еженедельный")
