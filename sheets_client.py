@@ -120,12 +120,17 @@ class SheetsClient:
             logger.warning("Could not parse number from: %r", value)
             return 0.0
 
-    def get_new_sales_revenue(self, spreadsheet_id: str, target_date: date) -> float:
+    def get_new_sales_revenue(self, spreadsheet_id: str, target_date: date, sheet_name: str = "План еженедельный") -> float:
         """
-        Set date in 'План еженедельный', then return D47 + D48.
+        Set date in the weekly plan sheet, then return D47 + D48.
         """
         ss = self._open_spreadsheet(spreadsheet_id)
-        ws = ss.worksheet("План еженедельный")
+        try:
+            ws = ss.worksheet(sheet_name)
+        except WorksheetNotFound:
+            available = [w.title for w in ss.worksheets()]
+            logger.error("Sheet %r not found. Available sheets: %s", sheet_name, available)
+            raise
         self._set_date_range(ws, target_date)
 
         d47 = self._parse_number(ws.acell(f"{REVENUE_COL}{NEW_SALES_REV_ROW_START}").value)
@@ -134,12 +139,12 @@ class SheetsClient:
         logger.info("New sales revenue on %s: %.2f (D47=%.2f, D48=%.2f)", target_date, total, d47, d48)
         return total
 
-    def get_upsales_revenue(self, spreadsheet_id: str, target_date: date) -> float:
+    def get_upsales_revenue(self, spreadsheet_id: str, target_date: date, sheet_name: str = "План еженедельный") -> float:
         """
-        Set date in 'План еженедельный', then return D49 + D50.
+        Set date in the weekly plan sheet, then return D49 + D50.
         """
         ss = self._open_spreadsheet(spreadsheet_id)
-        ws = ss.worksheet("План еженедельный")
+        ws = ss.worksheet(sheet_name)
         self._set_date_range(ws, target_date)
 
         d49 = self._parse_number(ws.acell(f"{REVENUE_COL}{UPSALES_REV_ROW_START}").value)

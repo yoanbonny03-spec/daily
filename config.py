@@ -122,6 +122,9 @@ def load_config() -> dict:
         # Name of the worksheet tab in the daily report spreadsheet
         "REPORT_SHEET_NAME": _optional("REPORT_SHEET_NAME", "Февраль заполнение"),
 
+        # Name of the weekly plan worksheet tab in the payment spreadsheet
+        "WEEKLY_PLAN_SHEET_NAME": _optional("WEEKLY_PLAN_SHEET_NAME", "План еженедельный"),
+
         # Column letters in the report sheet
         "REPORT_CITY_COL": _optional("REPORT_CITY_COL", "A"),
         "REPORT_DATE_COL": _optional("REPORT_DATE_COL", "B"),

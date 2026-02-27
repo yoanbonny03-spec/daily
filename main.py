@@ -119,14 +119,16 @@ def run_for_date(target_date: date, cfg: dict) -> None:
     upsales_purch = sheets.count_upsales_purchases(payment_spreadsheet_id, target_date)
     logger.info("Upsales purch: %d", upsales_purch)
 
+    weekly_plan_sheet = cfg.get("WEEKLY_PLAN_SHEET_NAME", "План еженедельный")
+
     # 4. New sales revenue (col V)
     logger.info("--- Шаг 4: выручка новых продаж из Google Sheets ---")
-    new_sales_revenue = sheets.get_new_sales_revenue(payment_spreadsheet_id, target_date)
+    new_sales_revenue = sheets.get_new_sales_revenue(payment_spreadsheet_id, target_date, weekly_plan_sheet)
     logger.info("New sales revenue: %.2f", new_sales_revenue)
 
     # 5. Upsales revenue (col W)
     logger.info("--- Шаг 5: выручка допродаж из Google Sheets ---")
-    upsales_revenue = sheets.get_upsales_revenue(payment_spreadsheet_id, target_date)
+    upsales_revenue = sheets.get_upsales_revenue(payment_spreadsheet_id, target_date, weekly_plan_sheet)
     logger.info("Upsales revenue: %.2f", upsales_revenue)
 
     # ---- Write to daily report ----
