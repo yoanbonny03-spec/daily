@@ -152,12 +152,16 @@ class AmoCRMClient:
         date_to: int,
         pipeline_ids: list[int] = None,
         status_ids: list[int] = None,
+        extra_cf_filters: dict = None,
     ) -> list:
         """
         Fetch leads where a custom date field is within [date_from, date_to].
 
-        Tries two AmoCRM filter formats. If both return 400, raises RuntimeError
-        (does NOT fall back to downloading all leads).
+        extra_cf_filters: {field_id: value} — дополнительные фильтры по кастомным полям,
+        например {city_field_id: "Астана", dept_field_id: "Оффлайн"}.
+        Добавляются как filter[cf][field_id][]=value в запрос к AmoCRM.
+
+        Tries two AmoCRM date filter formats. If both return 400, raises RuntimeError.
         """
         base_params: dict = {}
         if pipeline_ids:
@@ -166,6 +170,9 @@ class AmoCRMClient:
         if status_ids:
             for i, sid in enumerate(status_ids):
                 base_params[f"filter[statuses][{i}][status_id]"] = sid
+        if extra_cf_filters:
+            for cf_id, cf_val in extra_cf_filters.items():
+                base_params[f"filter[cf][{cf_id}][]"] = cf_val
 
         filter_prefixes = [
             f"filter[cf][{field_id}]",
@@ -256,6 +263,10 @@ class AmoCRMClient:
             date_to=day_end,
             pipeline_ids=pipeline_ids,
             status_ids=won_status_ids,
+            extra_cf_filters={
+                city_field_id: city_value,
+                department_field_id: department_value,
+            },
         )
 
         count_total = 0
@@ -302,6 +313,10 @@ class AmoCRMClient:
             date_from=day_start,
             date_to=day_end,
             pipeline_ids=pipeline_ids,
+            extra_cf_filters={
+                city_field_id: city_value,
+                department_field_id: department_value,
+            },
         )
 
         count = 0
