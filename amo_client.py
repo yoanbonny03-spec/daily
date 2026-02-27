@@ -281,12 +281,20 @@ class AmoCRMClient:
         day_start, day_end = _day_bounds_astana(target_date)
         logger.info("count_new_sales: date=%s, pipeline_ids=%s", target_date, pipeline_ids)
 
+        # closed_at ограничивает выборку на уровне API — без него AmoCRM отдаёт
+        # все исторические лиды воронки (тысячи) и скрипт уходит в таймаут.
+        # Окно ±7 дней вокруг target_date захватывает сделки, у которых
+        # дата договора и дата закрытия немного расходятся.
+        # Точное совпадение даты договора проверяем в Python ниже.
+        window = 7 * 24 * 3600
         leads = self.get_leads_by_date_field(
             field_id=contract_date_field_id,
             date_from=day_start,
             date_to=day_end,
             pipeline_ids=pipeline_ids,
             enum_filters={city_field_id: city_enum_id, dept_field_id: dept_enum_id},
+            closed_at_from=day_start - window,
+            closed_at_to=day_end + window,
         )
 
         logger.info("count_new_sales: leads from API = %d, checking contract date in Python", len(leads))
