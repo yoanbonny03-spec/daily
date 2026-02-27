@@ -292,6 +292,7 @@ class AmoCRMClient:
         target_date: date,
         pipeline_ids: list[int],
         contract_date_field_id: int,
+        new_request_field_id: int,
         won_status_ids: list[int],
         city_field_id: int,
         city_enum_id: int,
@@ -304,8 +305,8 @@ class AmoCRMClient:
           - дата заключения договора = target_date (проверка Python)
           - город = Астана, отдел = Offline (проверка Python через enum_id)
 
-        closed_at используется только как технический ограничитель (±30 дней)
-        чтобы не тянуть всю историю воронки — в бизнес-логику не входит.
+        count_1d_3d: дата договора − поле "Новая заявка" ≤ 3 дня.
+        closed_at используется только как технический ограничитель (±7 дней).
         """
         day_start, day_end = _day_bounds_astana(target_date)
         logger.info("count_new_sales: date=%s, pipeline_ids=%s, won_statuses=%s",
@@ -337,11 +338,17 @@ class AmoCRMClient:
                 continue
 
             count_total += 1
-            created_at = lead.get("created_at")
-            if created_at:
-                delta = target_date - datetime.fromtimestamp(created_at, tz=ASTANA_TZ).date()
-                if delta <= threshold:
-                    count_1d_3d += 1
+
+            # 1d-3d: разница между датой договора и полем "Новая заявка" ≤ 3 дней
+            new_request_ts = self._get_custom_field_value(lead, new_request_field_id)
+            if new_request_ts:
+                try:
+                    new_request_date = datetime.fromtimestamp(int(new_request_ts), tz=ASTANA_TZ).date()
+                    delta = target_date - new_request_date
+                    if timedelta(0) <= delta <= threshold:
+                        count_1d_3d += 1
+                except (ValueError, TypeError, OSError):
+                    logger.warning("lead %s: bad new_request value %r", lead.get("id"), new_request_ts)
 
         return count_1d_3d, count_total
 

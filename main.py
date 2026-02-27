@@ -78,6 +78,7 @@ def run_for_date(target_date: date, cfg: dict) -> None:
     dept_enum_id = int(cfg["AMO_DEPT_ENUM_ID"])
     end_date_field_id = int(cfg["AMO_END_DATE_FIELD_ID"])
     contract_date_field_id = int(cfg["AMO_CONTRACT_DATE_FIELD_ID"])
+    new_request_field_id = int(cfg["AMO_NEW_REQUEST_FIELD_ID"])
 
     # Resolve won status IDs — only leads in these 7 stages count as real sales
     won_status_names = cfg.get("AMO_WON_STATUS_NAMES", [])
@@ -90,6 +91,7 @@ def run_for_date(target_date: date, cfg: dict) -> None:
         target_date=target_date,
         pipeline_ids=sales_pipeline_ids,
         contract_date_field_id=contract_date_field_id,
+        new_request_field_id=new_request_field_id,
         won_status_ids=won_status_ids,
         city_field_id=city_field_id,
         city_enum_id=city_enum_id,
