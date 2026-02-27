@@ -4,12 +4,27 @@ AmoCRM API client for fetching sales and lead data.
 
 import time
 import logging
-from datetime import datetime, date, timedelta
+from datetime import datetime, date, timedelta, timezone
 from typing import Optional
 
 import requests
 
 logger = logging.getLogger(__name__)
+
+# Astana is UTC+5
+ASTANA_TZ = timezone(timedelta(hours=5))
+
+
+def _day_bounds_astana(target_date: date) -> tuple[int, int]:
+    """
+    Return (day_start, day_end) as unix timestamps for the given date
+    in Astana local time (UTC+5).
+    """
+    day_start = int(datetime(target_date.year, target_date.month, target_date.day,
+                              0, 0, 0, tzinfo=ASTANA_TZ).timestamp())
+    day_end   = int(datetime(target_date.year, target_date.month, target_date.day,
+                              23, 59, 59, tzinfo=ASTANA_TZ).timestamp())
+    return day_start, day_end
 
 
 class AmoCRMClient:
@@ -24,15 +39,28 @@ class AmoCRMClient:
         })
 
     def _get(self, path: str, params: dict = None) -> dict:
+        """
+        GET request. Builds query string with literal brackets (not %-encoded)
+        because AmoCRM rejects %5B%5D-encoded bracket params.
+        """
         url = f"{self.base_url}{path}"
-        resp = self.session.get(url, params=params)
+        if params:
+            qs = "&".join(f"{k}={v}" for k, v in params.items())
+            full_url = f"{url}?{qs}"
+        else:
+            full_url = url
+
+        resp = self.session.get(full_url)
+
         if resp.status_code == 429:
             retry_after = int(resp.headers.get("Retry-After", 5))
             logger.warning("Rate limited, sleeping %s s", retry_after)
             time.sleep(retry_after)
-            resp = self.session.get(url, params=params)
+            resp = self.session.get(full_url)
+
         if not resp.ok:
-            logger.error("AmoCRM API %d: %s | URL: %s", resp.status_code, resp.text[:500], resp.url)
+            logger.error("AmoCRM API %d | URL: %s | Body: %s",
+                         resp.status_code, resp.url, resp.text[:500])
         resp.raise_for_status()
         return resp.json()
 
@@ -58,7 +86,8 @@ class AmoCRMClient:
             if len(batch) < 250:
                 break
             if max_pages and page >= max_pages:
-                logger.warning("Reached max_pages=%d limit (%d leads). Some results may be missing.", max_pages, len(results))
+                logger.warning("Reached max_pages=%d (%d leads). Some results may be missing.",
+                               max_pages, len(results))
                 break
             page += 1
         return results
@@ -84,11 +113,9 @@ class AmoCRMClient:
         return data.get("_embedded", {}).get("pipelines", [])
 
     def get_pipeline_map(self) -> dict:
-        """Return dict name -> id for pipelines."""
         return {p["name"]: p["id"] for p in self.get_pipelines()}
 
     def get_status_map(self) -> dict:
-        """Return dict pipeline_id -> {status_name: status_id}."""
         result = {}
         for p in self.get_pipelines():
             statuses = {s["name"]: s["id"] for s in p.get("_embedded", {}).get("statuses", [])}
@@ -106,7 +133,6 @@ class AmoCRMClient:
         pipeline_ids: list[int] = None,
         status_ids: list[int] = None,
     ) -> list:
-        """Fetch leads closed within [closed_at_from, closed_at_to]."""
         params: dict = {
             "filter[closed_at][from]": closed_at_from,
             "filter[closed_at][to]": closed_at_to,
@@ -119,22 +145,6 @@ class AmoCRMClient:
                 params[f"filter[statuses][{i}][status_id]"] = sid
         return self._paginate("/leads", params)
 
-    def get_leads_by_pipeline(
-        self,
-        pipeline_ids: list[int],
-        status_ids: list[int] = None,
-        max_pages: int = None,
-    ) -> list:
-        """Fetch all leads in given pipelines (optionally filtered by status)."""
-        params: dict = {}
-        if pipeline_ids:
-            for i, pid in enumerate(pipeline_ids):
-                params[f"filter[pipeline_id][{i}]"] = pid
-        if status_ids:
-            for i, sid in enumerate(status_ids):
-                params[f"filter[statuses][{i}][status_id]"] = sid
-        return self._paginate("/leads", params, max_pages=max_pages)
-
     def get_leads_by_date_field(
         self,
         field_id: int,
@@ -146,10 +156,8 @@ class AmoCRMClient:
         """
         Fetch leads where a custom date field is within [date_from, date_to].
 
-        Tries two AmoCRM filter formats:
-          1. filter[cf][{field_id}][from/to]   — newer format
-          2. filter[custom_fields_values][{field_id}][from/to]  — older format
-        If both return 400, falls back to a full pipeline scan (max 20 pages).
+        Tries two AmoCRM filter formats. If both return 400, raises RuntimeError
+        (does NOT fall back to downloading all leads).
         """
         base_params: dict = {}
         if pipeline_ids:
@@ -163,6 +171,7 @@ class AmoCRMClient:
             f"filter[cf][{field_id}]",
             f"filter[custom_fields_values][{field_id}]",
         ]
+        last_error = None
         for prefix in filter_prefixes:
             params = {
                 f"{prefix}[from]": date_from,
@@ -171,25 +180,22 @@ class AmoCRMClient:
             }
             try:
                 leads = self._paginate("/leads", params)
-                logger.debug("Date filter '%s' succeeded, got %d leads", prefix, len(leads))
+                logger.info("Date filter '%s' OK — got %d leads", prefix, len(leads))
                 return leads
             except requests.HTTPError as exc:
                 if exc.response.status_code == 400:
-                    logger.warning("Date filter '%s' returned 400, trying next format...", prefix)
+                    logger.warning("Date filter '%s' → 400, trying next format...", prefix)
+                    last_error = exc
                     continue
                 raise
 
-        # Both API filter formats failed — fall back to full pipeline scan
-        logger.error(
-            "All API date filters failed for field_id=%s. "
-            "Falling back to full pipeline scan (max 20 pages = 5000 leads). "
-            "Check that AMO_END_DATE_FIELD_ID / AMO_CONTRACT_DATE_FIELD_ID are correct.",
-            field_id,
+        raise RuntimeError(
+            f"AmoCRM rejected both date filter formats for field_id={field_id}. "
+            f"Check that AMO_END_DATE_FIELD_ID / AMO_CONTRACT_DATE_FIELD_ID are correct "
+            f"(run 'Показать поля AmoCRM' to see actual IDs). Last error: {last_error}"
         )
-        return self.get_leads_by_pipeline(pipeline_ids, status_ids, max_pages=20)
 
     def get_won_status_ids(self, pipeline_ids: list[int], status_names: list[str]) -> list[int]:
-        """Return status IDs whose names match status_names within the given pipelines."""
         names_set = set(status_names)
         result = []
         for p in self.get_pipelines():
@@ -215,7 +221,6 @@ class AmoCRMClient:
 
     @staticmethod
     def _field_matches_date(field_value, day_start: int, day_end: int) -> bool:
-        """Check if a custom date field value (unix ts) falls within the target day."""
         if field_value is None:
             return False
         try:
@@ -236,35 +241,28 @@ class AmoCRMClient:
         department_value: str = "Оффлайн",
     ) -> tuple[int, int]:
         """
-        Returns (count_1d_3d, count_total) for new sales on target_date.
-
-        Pre-filters by closed_at ±14 days, then filters by contract date field in Python.
+        Returns (count_1d_3d, count_total) for leads where
+        дата_заключения_договора = target_date, город=Астана, отдел=Оффлайн.
         """
-        day_start = int(datetime.combine(target_date, datetime.min.time()).timestamp())
-        day_end = int(datetime.combine(target_date, datetime.max.time()).timestamp())
+        day_start, day_end = _day_bounds_astana(target_date)
+        logger.info(
+            "count_new_sales: date=%s, contract_field=%s, day_start=%s, day_end=%s",
+            target_date, contract_date_field_id, day_start, day_end,
+        )
 
-        window = timedelta(days=14)
-        closed_from = int(datetime.combine(target_date - window, datetime.min.time()).timestamp())
-        closed_to = int(datetime.combine(target_date + window, datetime.max.time()).timestamp())
-
-        logger.info("Fetching new-sales leads closed ±14 days around %s", target_date)
-        leads = self.get_leads(
-            closed_at_from=closed_from,
-            closed_at_to=closed_to,
+        leads = self.get_leads_by_date_field(
+            field_id=contract_date_field_id,
+            date_from=day_start,
+            date_to=day_end,
             pipeline_ids=pipeline_ids,
             status_ids=won_status_ids,
         )
-        logger.debug("Got %d leads from API before contract-date filter", len(leads))
 
         count_total = 0
         count_1d_3d = 0
         threshold = timedelta(days=3)
 
         for lead in leads:
-            contract_val = self._get_custom_field_value(lead, contract_date_field_id)
-            if not self._field_matches_date(contract_val, day_start, day_end):
-                continue
-
             city = self._get_custom_field_value(lead, city_field_id)
             dept = self._get_custom_field_value(lead, department_field_id)
             if city != city_value or dept != department_value:
@@ -273,7 +271,7 @@ class AmoCRMClient:
             count_total += 1
             created_at = lead.get("created_at")
             if created_at:
-                delta = target_date - datetime.fromtimestamp(created_at).date()
+                delta = target_date - datetime.fromtimestamp(created_at, tz=ASTANA_TZ).date()
                 if delta <= threshold:
                     count_1d_3d += 1
 
@@ -290,28 +288,24 @@ class AmoCRMClient:
         department_value: str = "Оффлайн",
     ) -> int:
         """
-        Count active leads where end_of_classes = target_date, city=Астана, dept=Оффлайн.
-
-        Uses API date filter (two formats tried). Falls back to full pipeline scan if needed.
+        Count active leads where дата_окончания_занятий = target_date,
+        город=Астана, отдел=Оффлайн.
         """
-        day_start = int(datetime.combine(target_date, datetime.min.time()).timestamp())
-        day_end = int(datetime.combine(target_date, datetime.max.time()).timestamp())
+        day_start, day_end = _day_bounds_astana(target_date)
+        logger.info(
+            "count_expires: date=%s, end_date_field=%s, day_start=%s, day_end=%s",
+            target_date, end_date_field_id, day_start, day_end,
+        )
 
-        logger.info("Fetching expires leads for %s via API date filter (field_id=%s)", target_date, end_date_field_id)
         leads = self.get_leads_by_date_field(
             field_id=end_date_field_id,
             date_from=day_start,
             date_to=day_end,
             pipeline_ids=pipeline_ids,
         )
-        logger.debug("Got %d leads after API filter", len(leads))
 
         count = 0
         for lead in leads:
-            # When API filter works we still verify in Python (double-check)
-            end_val = self._get_custom_field_value(lead, end_date_field_id)
-            if end_val is not None and not self._field_matches_date(end_val, day_start, day_end):
-                continue
             city = self._get_custom_field_value(lead, city_field_id)
             dept = self._get_custom_field_value(lead, department_field_id)
             if city == city_value and dept == department_value:
