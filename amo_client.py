@@ -174,7 +174,31 @@ class AmoCRMClient:
                 params[f"filter[statuses][{i}][status_id]"] = sid
         return self._paginate("/leads", params)
 
-    def get_leads_by_date_field(
+    def get_leads_by_status(
+        self,
+        pipeline_ids: list[int],
+        status_ids: list[int],
+    ) -> list:
+        """
+        Fetch active leads filtered only by pipeline + status (no closed_at).
+        Use when stages are intermediate (not AmoCRM 'won'), so closed_at is not set.
+        """
+        params: dict = {}
+        if pipeline_ids:
+            for i, pid in enumerate(pipeline_ids):
+                params[f"filter[pipeline_id][{i}]"] = pid
+        if status_ids and pipeline_ids:
+            idx = 0
+            for pid in pipeline_ids:
+                for sid in status_ids:
+                    params[f"filter[statuses][{idx}][pipeline_id]"] = pid
+                    params[f"filter[statuses][{idx}][status_id]"] = sid
+                    idx += 1
+        elif status_ids:
+            for i, sid in enumerate(status_ids):
+                params[f"filter[statuses][{i}][status_id]"] = sid
+        return self._paginate("/leads", params)
+
         self,
         field_id: int,
         date_from: int,
@@ -320,13 +344,9 @@ class AmoCRMClient:
         logger.info("count_new_sales: date=%s, pipeline_ids=%s, won_statuses=%s",
                     target_date, pipeline_ids, won_status_ids)
 
-        # AmoCRM custom-field date filters are slow/unreliable; use fast native
-        # closed_at filter with a ±60-day window, then filter by contract date in Python.
-        window_from = day_start - 60 * 86400
-        window_to   = day_end   + 7 * 86400
-        leads = self.get_leads(
-            closed_at_from=window_from,
-            closed_at_to=window_to,
+        # Эти этапы — активные стадии воронки, closed_at у них не выставляется.
+        # Берём все лиды в нужных стадиях и фильтруем по дате договора в Python.
+        leads = self.get_leads_by_status(
             pipeline_ids=pipeline_ids,
             status_ids=won_status_ids,
         )
