@@ -251,6 +251,16 @@ class AmoCRMClient:
         return None
 
     @staticmethod
+    def _get_custom_field_enum_id(lead: dict, field_id: int) -> Optional[int]:
+        """Return the enum_id of a select/radio custom field value."""
+        for cfv in lead.get("custom_fields_values") or []:
+            if cfv.get("field_id") == field_id:
+                vals = cfv.get("values", [])
+                if vals:
+                    return vals[0].get("enum_id")
+        return None
+
+    @staticmethod
     def _field_matches_date(field_value, day_start: int, day_end: int) -> bool:
         if field_value is None:
             return False
@@ -281,28 +291,30 @@ class AmoCRMClient:
         day_start, day_end = _day_bounds_astana(target_date)
         logger.info("count_new_sales: date=%s, pipeline_ids=%s", target_date, pipeline_ids)
 
-        # closed_at ограничивает выборку на уровне API — без него AmoCRM отдаёт
-        # все исторические лиды воронки (тысячи) и скрипт уходит в таймаут.
-        # Окно ±7 дней вокруг target_date захватывает сделки, у которых
-        # дата договора и дата закрытия немного расходятся.
-        # Точное совпадение даты договора проверяем в Python ниже.
-        window = 7 * 24 * 3600
+        # closed_at ограничивает выборку на уровне API (надёжный стандартный фильтр).
+        # AmoCRM игнорирует filter[cf][date_field][from/to] и enum-фильтры,
+        # поэтому фильтрацию по городу, отделу и дате договора делаем в Python.
         leads = self.get_leads_by_date_field(
             field_id=contract_date_field_id,
             date_from=day_start,
             date_to=day_end,
             pipeline_ids=pipeline_ids,
-            enum_filters={city_field_id: city_enum_id, dept_field_id: dept_enum_id},
-            closed_at_from=day_start - window,
-            closed_at_to=day_end + window,
+            closed_at_from=day_start,
+            closed_at_to=day_end,
         )
 
-        logger.info("count_new_sales: leads from API = %d, checking contract date in Python", len(leads))
+        logger.info("count_new_sales: leads from API = %d, filtering by city/dept/contract_date in Python", len(leads))
         count_total = 0
         count_1d_3d = 0
         threshold = timedelta(days=3)
 
         for lead in leads:
+            # Фильтр по городу и отделу через enum_id — надёжнее текстового сравнения
+            if self._get_custom_field_enum_id(lead, city_field_id) != city_enum_id:
+                continue
+            if self._get_custom_field_enum_id(lead, dept_field_id) != dept_enum_id:
+                continue
+            # Проверяем дату договора (API-фильтр по ней не работает)
             contract_date = self._get_custom_field_value(lead, contract_date_field_id)
             if not self._field_matches_date(contract_date, day_start, day_end):
                 continue
@@ -344,9 +356,13 @@ class AmoCRMClient:
             enum_filters={city_field_id: city_enum_id, dept_field_id: dept_enum_id},
         )
 
-        logger.info("count_expires: leads from API = %d, checking end_date in Python", len(leads))
+        logger.info("count_expires: leads from API = %d, filtering by city/dept/end_date in Python", len(leads))
         count = 0
         for lead in leads:
+            if self._get_custom_field_enum_id(lead, city_field_id) != city_enum_id:
+                continue
+            if self._get_custom_field_enum_id(lead, dept_field_id) != dept_enum_id:
+                continue
             end_date = self._get_custom_field_value(lead, end_date_field_id)
             if self._field_matches_date(end_date, day_start, day_end):
                 count += 1
