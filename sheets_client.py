@@ -220,6 +220,12 @@ class SheetsClient:
                 "Could not find row for city=%s, date=%s in sheet '%s'",
                 city_value, target_date, report_sheet_name,
             )
+            logger.error("Looking for date strings: %s", date_candidates)
+            logger.error("First 15 rows (col %s, col %s):", city_col, date_col)
+            for i, row in enumerate(all_values[:15]):
+                a = row[city_col_idx].strip() if len(row) > city_col_idx else "<empty>"
+                b = row[date_col_idx].strip() if len(row) > date_col_idx else "<empty>"
+                logger.error("  row %d: city=%r  date=%r", i + 1, a, b)
             return False
 
         # gspread uses 1-based row numbers
