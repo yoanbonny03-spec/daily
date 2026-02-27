@@ -188,9 +188,15 @@ class AmoCRMClient:
         if pipeline_ids:
             for i, pid in enumerate(pipeline_ids):
                 base_params[f"filter[pipeline_id][{i}]"] = pid
-        if status_ids:
-            for i, sid in enumerate(status_ids):
-                base_params[f"filter[statuses][{i}][status_id]"] = sid
+        # AmoCRM v4: statuses filter requires BOTH pipeline_id AND status_id per group.
+        # Without pipeline_id the filter is silently ignored and all leads are returned.
+        if status_ids and pipeline_ids:
+            idx = 0
+            for pid in pipeline_ids:
+                for sid in status_ids:
+                    base_params[f"filter[statuses][{idx}][pipeline_id]"] = pid
+                    base_params[f"filter[statuses][{idx}][status_id]"] = sid
+                    idx += 1
         if closed_at_from is not None:
             base_params["filter[closed_at][from]"] = closed_at_from
         if closed_at_to is not None:
@@ -305,15 +311,15 @@ class AmoCRMClient:
         logger.info("count_new_sales: date=%s, pipeline_ids=%s, won_statuses=%s",
                     target_date, pipeline_ids, won_status_ids)
 
-        thirty_days = 30 * 24 * 3600
+        seven_days = 7 * 24 * 3600
         leads = self.get_leads_by_date_field(
             field_id=contract_date_field_id,
             date_from=day_start,
             date_to=day_end,
             pipeline_ids=pipeline_ids,
             status_ids=won_status_ids,
-            closed_at_from=day_start - thirty_days,
-            closed_at_to=day_end + thirty_days,
+            closed_at_from=day_start - seven_days,
+            closed_at_to=day_end + seven_days,
         )
 
         logger.info("count_new_sales: leads from API = %d, checking contract_date/city/dept in Python", len(leads))
