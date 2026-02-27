@@ -176,13 +176,13 @@ class AmoCRMClient:
         status_ids: list[int] = None,
         closed_at_from: int = None,
         closed_at_to: int = None,
+        enum_filters: dict = None,
     ) -> list:
         """
-        Fetch leads where a custom date field is within [date_from, date_to].
+        Fetch leads, optionally filtered by date field and enum custom fields.
 
-        closed_at_from / closed_at_to — дополнительный фильтр по стандартному полю
-        AmoCRM closed_at (дата закрытия сделки). Работает надёжно, в отличие от
-        фильтрации по значениям кастомных enum-полей.
+        enum_filters — dict {field_id: enum_value_id} для фильтрации по
+        кастомным enum-полям (город, отдел) прямо на уровне API.
         """
         base_params: dict = {}
         if pipeline_ids:
@@ -195,6 +195,9 @@ class AmoCRMClient:
             base_params["filter[closed_at][from]"] = closed_at_from
         if closed_at_to is not None:
             base_params["filter[closed_at][to]"] = closed_at_to
+        if enum_filters:
+            for cf_id, enum_id in enum_filters.items():
+                base_params[f"filter[cf][{cf_id}][0]"] = enum_id
 
         filter_prefixes = [
             f"filter[cf][{field_id}]",
@@ -220,8 +223,7 @@ class AmoCRMClient:
 
         raise RuntimeError(
             f"AmoCRM rejected both date filter formats for field_id={field_id}. "
-            f"Check that AMO_END_DATE_FIELD_ID / AMO_CONTRACT_DATE_FIELD_ID are correct "
-            f"(run 'Показать поля AmoCRM' to see actual IDs). Last error: {last_error}"
+            f"Last error: {last_error}"
         )
 
     def get_won_status_ids(self, pipeline_ids: list[int], status_names: list[str]) -> list[int]:
@@ -261,47 +263,40 @@ class AmoCRMClient:
     def count_new_sales(
         self,
         target_date: date,
-        city_field_id: int,
-        department_field_id: int,
         pipeline_ids: list[int],
         contract_date_field_id: int,
-        won_status_ids: list[int],
-        city_value: str = "Астана",
-        department_value: str = "Offline",
+        city_field_id: int,
+        city_enum_id: int,
+        dept_field_id: int,
+        dept_enum_id: int,
     ) -> tuple[int, int]:
         """
         Returns (count_1d_3d, count_total) for leads where
         дата_заключения_договора = target_date, город=Астана, отдел=Offline.
+
+        Фильтр по городу и отделу применяется на уровне API через enum ID
+        (аналогично фильтру в AmoCRM UI). Дата договора проверяется в Python,
+        т.к. AmoCRM игнорирует filter[cf][date_field][from/to].
         """
         day_start, day_end = _day_bounds_astana(target_date)
-        logger.info(
-            "count_new_sales: date=%s, contract_field=%s, day_start=%s, day_end=%s",
-            target_date, contract_date_field_id, day_start, day_end,
-        )
+        logger.info("count_new_sales: date=%s, pipeline_ids=%s", target_date, pipeline_ids)
 
-        # closed_at ограничивает выборку на уровне API (работает надёжно).
-        # filter[cf][contract_date] AmoCRM по факту игнорирует — без closed_at
-        # API отдаёт все сделки воронки и скрипт уходит в таймаут.
-        # Точное совпадение даты договора проверяем в Python ниже.
         leads = self.get_leads_by_date_field(
             field_id=contract_date_field_id,
             date_from=day_start,
             date_to=day_end,
             pipeline_ids=pipeline_ids,
-            status_ids=won_status_ids,
-            closed_at_from=day_start,
-            closed_at_to=day_end,
+            enum_filters={city_field_id: city_enum_id, dept_field_id: dept_enum_id},
         )
 
-        logger.info("count_new_sales: total leads from API = %d", len(leads))
+        logger.info("count_new_sales: leads from API = %d, checking contract date in Python", len(leads))
         count_total = 0
         count_1d_3d = 0
         threshold = timedelta(days=3)
 
         for lead in leads:
-            city = self._get_custom_field_value(lead, city_field_id)
-            dept = self._get_custom_field_value(lead, department_field_id)
-            if city != city_value or dept != department_value:
+            contract_date = self._get_custom_field_value(lead, contract_date_field_id)
+            if not self._field_matches_date(contract_date, day_start, day_end):
                 continue
 
             count_total += 1
@@ -317,38 +312,35 @@ class AmoCRMClient:
         self,
         target_date: date,
         end_date_field_id: int,
-        city_field_id: int,
-        department_field_id: int,
         pipeline_ids: list[int],
-        city_value: str = "Астана",
-        department_value: str = "Offline",
+        city_field_id: int,
+        city_enum_id: int,
+        dept_field_id: int,
+        dept_enum_id: int,
     ) -> int:
         """
         Count active leads where дата_окончания_занятий = target_date,
         город=Астана, отдел=Offline.
+
+        Фильтр по городу и отделу применяется на уровне API через enum ID.
+        Дата окончания проверяется в Python.
         """
         day_start, day_end = _day_bounds_astana(target_date)
-        logger.info(
-            "count_expires: date=%s, end_date_field=%s, day_start=%s, day_end=%s",
-            target_date, end_date_field_id, day_start, day_end,
-        )
+        logger.info("count_expires: date=%s, pipeline_ids=%s", target_date, pipeline_ids)
 
         leads = self.get_leads_by_date_field(
             field_id=end_date_field_id,
             date_from=day_start,
             date_to=day_end,
             pipeline_ids=pipeline_ids,
+            enum_filters={city_field_id: city_enum_id, dept_field_id: dept_enum_id},
         )
 
+        logger.info("count_expires: leads from API = %d, checking end_date in Python", len(leads))
         count = 0
         for lead in leads:
-            city = self._get_custom_field_value(lead, city_field_id)
-            dept = self._get_custom_field_value(lead, department_field_id)
-            if city != city_value or dept != department_value:
-                continue
             end_date = self._get_custom_field_value(lead, end_date_field_id)
-            if not self._field_matches_date(end_date, day_start, day_end):
-                continue
-            count += 1
+            if self._field_matches_date(end_date, day_start, day_end):
+                count += 1
 
         return count

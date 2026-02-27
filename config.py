@@ -61,9 +61,15 @@ def load_config() -> dict:
         "AMO_ACCESS_TOKEN": _require("AMO_ACCESS_TOKEN"),
 
         # Custom field IDs — find these via GET /api/v4/leads/custom_fields
-        "AMO_CITY_FIELD_ID": _require("AMO_CITY_FIELD_ID"),
-        "AMO_DEPARTMENT_FIELD_ID": _require("AMO_DEPARTMENT_FIELD_ID"),
+        # City field (Город): 879211, Department field (Отдел): 912857
+        "AMO_CITY_FIELD_ID": _optional("AMO_CITY_FIELD_ID", "879211"),
+        "AMO_DEPARTMENT_FIELD_ID": _optional("AMO_DEPARTMENT_FIELD_ID", "912857"),
         "AMO_END_DATE_FIELD_ID": _require("AMO_END_DATE_FIELD_ID"),
+
+        # Enum value IDs for API-level filtering (from AmoCRM filter URL)
+        # Астана enum: 889947, Offline enum: 914379
+        "AMO_CITY_ENUM_ID": _optional("AMO_CITY_ENUM_ID", "889947"),
+        "AMO_DEPT_ENUM_ID": _optional("AMO_DEPT_ENUM_ID", "914379"),
 
         # Pipeline names for new sales (contracts)
         # JSON array or comma-separated list
