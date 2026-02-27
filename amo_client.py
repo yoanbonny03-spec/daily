@@ -279,18 +279,26 @@ class AmoCRMClient:
             target_date, contract_date_field_id, day_start, day_end,
         )
 
-        # closed_at ограничивает выборку конкретным днём на уровне AmoCRM (стандартное поле,
-        # работает надёжно). Город/отдел фильтруются в Python ниже, потому что это
-        # enum-поля — их нельзя фильтровать по текстовому значению через API.
+        # Фильтруем только по дате заключения договора и воронке —
+        # аналогично фильтру в AmoCRM UI ("Дата заключения договора = вчера").
+        # closed_at не используем: договор может быть подписан до закрытия сделки.
         leads = self.get_leads_by_date_field(
             field_id=contract_date_field_id,
             date_from=day_start,
             date_to=day_end,
             pipeline_ids=pipeline_ids,
             status_ids=won_status_ids,
-            closed_at_from=day_start,
-            closed_at_to=day_end,
         )
+
+        # Диагностика: показываем реальные значения city/dept из API
+        unique_city_dept = set()
+        for lead in leads:
+            c = self._get_custom_field_value(lead, city_field_id)
+            d = self._get_custom_field_value(lead, department_field_id)
+            unique_city_dept.add((c, d))
+        logger.info("count_new_sales: total leads=%d, looking for city=%r dept=%r",
+                    len(leads), city_value, department_value)
+        logger.info("count_new_sales: unique (city,dept) pairs found = %s", unique_city_dept)
 
         count_total = 0
         count_1d_3d = 0
