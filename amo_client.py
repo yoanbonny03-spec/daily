@@ -292,7 +292,6 @@ class AmoCRMClient:
         target_date: date,
         pipeline_ids: list[int],
         contract_date_field_id: int,
-        new_request_field_id: int,
         won_status_ids: list[int],
         city_field_id: int,
         city_enum_id: int,
@@ -301,54 +300,60 @@ class AmoCRMClient:
     ) -> tuple[int, int]:
         """
         Returns (count_1d_3d, count_total) for leads where:
-          - этап сделки — один из 7 стадий реальной оплаты (фильтр API)
-          - дата заключения договора = target_date (проверка Python)
+          - воронка = sales pipelines
           - город = Астана, отдел = Offline (проверка Python через enum_id)
+          - дата заключения договора = target_date (проверка Python)
+          - этап сделки — один из 7 стадий (проверка Python через status_id)
 
-        count_1d_3d: дата договора − поле "Новая заявка" ≤ 3 дня.
-        closed_at используется только как технический ограничитель (±7 дней).
+        count_1d_3d: |дата_договора − дата_создания_лида| ≤ 3 дня.
+        Никакого фильтра по closed_at или статусам на уровне API — тянем
+        всё по дате договора, остальное проверяем в Python.
         """
         day_start, day_end = _day_bounds_astana(target_date)
         logger.info("count_new_sales: date=%s, pipeline_ids=%s, won_statuses=%s",
                     target_date, pipeline_ids, won_status_ids)
 
-        seven_days = 7 * 24 * 3600
         leads = self.get_leads_by_date_field(
             field_id=contract_date_field_id,
             date_from=day_start,
             date_to=day_end,
             pipeline_ids=pipeline_ids,
-            status_ids=won_status_ids,
-            closed_at_from=day_start - seven_days,
-            closed_at_to=day_end + seven_days,
         )
 
-        logger.info("count_new_sales: leads from API = %d, checking contract_date/city/dept in Python", len(leads))
+        logger.info("count_new_sales: leads from API = %d, filtering city/dept/status/contract_date in Python", len(leads))
         count_total = 0
         count_1d_3d = 0
+        won_set = set(won_status_ids)
         threshold = timedelta(days=3)
 
         for lead in leads:
+            # Город = Астана
             if self._get_custom_field_enum_id(lead, city_field_id) != city_enum_id:
                 continue
+            # Отдел = Offline
             if self._get_custom_field_enum_id(lead, dept_field_id) != dept_enum_id:
                 continue
+            # Дата заключения договора = target_date
             contract_date = self._get_custom_field_value(lead, contract_date_field_id)
             if not self._field_matches_date(contract_date, day_start, day_end):
+                continue
+            # Этап сделки — один из 7 нужных стадий
+            if lead.get("status_id") not in won_set:
+                logger.debug("lead %s: status_id=%s не в won_set, пропуск", lead.get("id"), lead.get("status_id"))
                 continue
 
             count_total += 1
 
-            # 1d-3d: разница между датой договора и полем "Новая заявка" ≤ 3 дней
-            new_request_ts = self._get_custom_field_value(lead, new_request_field_id)
-            if new_request_ts:
+            # 1d-3d: дата создания лида ≤ 3 дней до даты договора
+            created_at = lead.get("created_at")
+            if created_at:
                 try:
-                    new_request_date = datetime.fromtimestamp(int(new_request_ts), tz=ASTANA_TZ).date()
-                    delta = target_date - new_request_date
+                    created_date = datetime.fromtimestamp(int(created_at), tz=ASTANA_TZ).date()
+                    delta = target_date - created_date
                     if timedelta(0) <= delta <= threshold:
                         count_1d_3d += 1
                 except (ValueError, TypeError, OSError):
-                    logger.warning("lead %s: bad new_request value %r", lead.get("id"), new_request_ts)
+                    logger.warning("lead %s: bad created_at value %r", lead.get("id"), created_at)
 
         return count_1d_3d, count_total
 
