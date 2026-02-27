@@ -132,7 +132,13 @@ class Handler(BaseHTTPRequestHandler):
 
 
 if __name__ == "__main__":
+    import traceback
     port = int(os.environ.get("PORT", 8080))
-    srv = ThreadedHTTPServer(("0.0.0.0", port), Handler)
-    print(f"Server running on http://0.0.0.0:{port}", flush=True)
-    srv.serve_forever()
+    try:
+        srv = ThreadedHTTPServer(("0.0.0.0", port), Handler)
+        print(f"Server running on http://0.0.0.0:{port}", flush=True)
+        sys.stdout.flush()
+        srv.serve_forever()
+    except Exception:
+        traceback.print_exc()
+        sys.exit(1)
