@@ -279,15 +279,18 @@ class AmoCRMClient:
             target_date, contract_date_field_id, day_start, day_end,
         )
 
-        # Фильтруем только по дате заключения договора и воронке —
-        # аналогично фильтру в AmoCRM UI ("Дата заключения договора = вчера").
-        # closed_at не используем: договор может быть подписан до закрытия сделки.
+        # closed_at ограничивает выборку на уровне API (работает надёжно).
+        # filter[cf][contract_date] AmoCRM по факту игнорирует — без closed_at
+        # API отдаёт все сделки воронки и скрипт уходит в таймаут.
+        # Точное совпадение даты договора проверяем в Python ниже.
         leads = self.get_leads_by_date_field(
             field_id=contract_date_field_id,
             date_from=day_start,
             date_to=day_end,
             pipeline_ids=pipeline_ids,
             status_ids=won_status_ids,
+            closed_at_from=day_start,
+            closed_at_to=day_end,
         )
 
         # Диагностика: показываем реальные значения city/dept из API
