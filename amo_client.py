@@ -267,11 +267,11 @@ class AmoCRMClient:
         contract_date_field_id: int,
         won_status_ids: list[int],
         city_value: str = "Астана",
-        department_value: str = "Оффлайн",
+        department_value: str = "Offline",
     ) -> tuple[int, int]:
         """
         Returns (count_1d_3d, count_total) for leads where
-        дата_заключения_договора = target_date, город=Астана, отдел=Оффлайн.
+        дата_заключения_договора = target_date, город=Астана, отдел=Offline.
         """
         day_start, day_end = _day_bounds_astana(target_date)
         logger.info(
@@ -293,16 +293,7 @@ class AmoCRMClient:
             closed_at_to=day_end,
         )
 
-        # Диагностика: показываем реальные значения city/dept из API
-        unique_city_dept = set()
-        for lead in leads:
-            c = self._get_custom_field_value(lead, city_field_id)
-            d = self._get_custom_field_value(lead, department_field_id)
-            unique_city_dept.add((c, d))
-        logger.info("count_new_sales: total leads=%d, looking for city=%r dept=%r",
-                    len(leads), city_value, department_value)
-        logger.info("count_new_sales: unique (city,dept) pairs found = %s", unique_city_dept)
-
+        logger.info("count_new_sales: total leads from API = %d", len(leads))
         count_total = 0
         count_1d_3d = 0
         threshold = timedelta(days=3)
@@ -330,11 +321,11 @@ class AmoCRMClient:
         department_field_id: int,
         pipeline_ids: list[int],
         city_value: str = "Астана",
-        department_value: str = "Оффлайн",
+        department_value: str = "Offline",
     ) -> int:
         """
         Count active leads where дата_окончания_занятий = target_date,
-        город=Астана, отдел=Оффлайн.
+        город=Астана, отдел=Offline.
         """
         day_start, day_end = _day_bounds_astana(target_date)
         logger.info(
@@ -353,7 +344,11 @@ class AmoCRMClient:
         for lead in leads:
             city = self._get_custom_field_value(lead, city_field_id)
             dept = self._get_custom_field_value(lead, department_field_id)
-            if city == city_value and dept == department_value:
-                count += 1
+            if city != city_value or dept != department_value:
+                continue
+            end_date = self._get_custom_field_value(lead, end_date_field_id)
+            if not self._field_matches_date(end_date, day_start, day_end):
+                continue
+            count += 1
 
         return count

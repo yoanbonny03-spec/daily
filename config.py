@@ -105,7 +105,7 @@ def load_config() -> dict:
 
         # Filter values
         "CITY_VALUE": _optional("CITY_VALUE", "Астана"),
-        "DEPARTMENT_VALUE": _optional("DEPARTMENT_VALUE", "Оффлайн"),
+        "DEPARTMENT_VALUE": _optional("DEPARTMENT_VALUE", "Offline"),
 
         # ---- Google Sheets ----
         # Either GOOGLE_SERVICE_ACCOUNT_JSON (for Railway/cloud) OR
