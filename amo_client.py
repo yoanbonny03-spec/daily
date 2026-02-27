@@ -50,13 +50,13 @@ class AmoCRMClient:
         else:
             full_url = url
 
-        resp = self.session.get(full_url)
+        resp = self.session.get(full_url, timeout=30)
 
         if resp.status_code == 429:
             retry_after = int(resp.headers.get("Retry-After", 5))
             logger.warning("Rate limited, sleeping %s s", retry_after)
             time.sleep(retry_after)
-            resp = self.session.get(full_url)
+            resp = self.session.get(full_url, timeout=30)
 
         if not resp.ok:
             logger.error("AmoCRM API %d | URL: %s | Body: %s",

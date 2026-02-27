@@ -83,6 +83,7 @@ def run_for_date(target_date: date, cfg: dict) -> None:
     logger.debug("Won status IDs resolved: %s", won_status_ids)
 
     # 1. New sales purch 1d-3d (col R) + New sales purch total (col S)
+    logger.info("--- Шаг 1: запрос новых продаж из AmoCRM ---")
     new_sales_1d3d, new_sales_total = amo.count_new_sales(
         target_date=target_date,
         city_field_id=city_field_id,
@@ -96,6 +97,7 @@ def run_for_date(target_date: date, cfg: dict) -> None:
     logger.info("New sales 1-3d: %d, total: %d", new_sales_1d3d, new_sales_total)
 
     # 2. Expires (col T)
+    logger.info("--- Шаг 2: запрос истекающих подписок из AmoCRM ---")
     expires = amo.count_expires(
         target_date=target_date,
         end_date_field_id=end_date_field_id,
@@ -113,18 +115,22 @@ def run_for_date(target_date: date, cfg: dict) -> None:
     payment_spreadsheet_id = cfg["PAYMENT_SPREADSHEET_ID"]
 
     # 3. Upsales purch (col U)
+    logger.info("--- Шаг 3: подсчёт допродаж из Google Sheets ---")
     upsales_purch = sheets.count_upsales_purchases(payment_spreadsheet_id, target_date)
     logger.info("Upsales purch: %d", upsales_purch)
 
     # 4. New sales revenue (col V)
+    logger.info("--- Шаг 4: выручка новых продаж из Google Sheets ---")
     new_sales_revenue = sheets.get_new_sales_revenue(payment_spreadsheet_id, target_date)
     logger.info("New sales revenue: %.2f", new_sales_revenue)
 
     # 5. Upsales revenue (col W)
+    logger.info("--- Шаг 5: выручка допродаж из Google Sheets ---")
     upsales_revenue = sheets.get_upsales_revenue(payment_spreadsheet_id, target_date)
     logger.info("Upsales revenue: %.2f", upsales_revenue)
 
     # ---- Write to daily report ----
+    logger.info("--- Шаг 6: запись в отчётную таблицу ---")
     ok = sheets.write_daily_report(
         report_spreadsheet_id=cfg["REPORT_SPREADSHEET_ID"],
         report_sheet_name=cfg.get("REPORT_SHEET_NAME", "Февраль заполнение"),
