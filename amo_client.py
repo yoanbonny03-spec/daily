@@ -31,6 +31,8 @@ class AmoCRMClient:
             logger.warning("Rate limited, sleeping %s s", retry_after)
             time.sleep(retry_after)
             resp = self.session.get(url, params=params)
+        if not resp.ok:
+            logger.error("AmoCRM API %d: %s | URL: %s", resp.status_code, resp.text[:500], resp.url)
         resp.raise_for_status()
         return resp.json()
 
@@ -109,7 +111,6 @@ class AmoCRMClient:
         params: dict = {
             "filter[closed_at][from]": closed_at_from,
             "filter[closed_at][to]": closed_at_to,
-            "with": "contacts,leads",
         }
         if pipeline_ids:
             for i, pid in enumerate(pipeline_ids):
@@ -120,29 +121,19 @@ class AmoCRMClient:
 
         return self._paginate("/leads", params)
 
-    def get_leads_by_date_field(
+    def get_leads_by_pipeline(
         self,
-        field_id: int,
-        date_from: int,
-        date_to: int,
-        pipeline_ids: list[int] = None,
+        pipeline_ids: list[int],
         status_ids: list[int] = None,
     ) -> list:
-        """
-        Fetch leads where a custom date field is within [date_from, date_to].
-        Used for 'Expires' (end_of_classes date) and new sales (contract date).
-        """
-        params: dict = {
-            f"filter[custom_fields_values][{field_id}][from]": date_from,
-            f"filter[custom_fields_values][{field_id}][to]": date_to,
-        }
+        """Fetch all leads in given pipelines (optionally filtered by status)."""
+        params: dict = {}
         if pipeline_ids:
             for i, pid in enumerate(pipeline_ids):
                 params[f"filter[pipeline_id][{i}]"] = pid
         if status_ids:
             for i, sid in enumerate(status_ids):
                 params[f"filter[statuses][{i}][status_id]"] = sid
-
         return self._paginate("/leads", params)
 
     def get_won_status_ids(self, pipeline_ids: list[int], status_names: list[str]) -> list[int]:
@@ -170,6 +161,17 @@ class AmoCRMClient:
                     return vals[0].get("value")
         return None
 
+    @staticmethod
+    def _field_matches_date(field_value, day_start: int, day_end: int) -> bool:
+        """Check if a custom date field value (unix ts) falls within the target day."""
+        if field_value is None:
+            return False
+        try:
+            ts = int(field_value)
+            return day_start <= ts <= day_end
+        except (ValueError, TypeError):
+            return False
+
     def count_new_sales(
         self,
         target_date: date,
@@ -185,25 +187,36 @@ class AmoCRMClient:
         Returns (count_1d_3d, count_total) for leads where contract_date = target_date,
         matching city and department filters.
 
-        count_1d_3d: deals where (target_date - created_at) <= 3 days
-        count_total: all deals matching filters
+        Fetches won leads from the pipeline closed within ±14 days of target_date,
+        then filters by contract_date custom field in Python.
         """
         day_start = int(datetime.combine(target_date, datetime.min.time()).timestamp())
         day_end = int(datetime.combine(target_date, datetime.max.time()).timestamp())
 
-        leads = self.get_leads_by_date_field(
-            field_id=contract_date_field_id,
-            date_from=day_start,
-            date_to=day_end,
+        # Pre-filter by closed_at ±14 days to limit data volume
+        window = timedelta(days=14)
+        closed_from = int(datetime.combine(target_date - window, datetime.min.time()).timestamp())
+        closed_to = int(datetime.combine(target_date + window, datetime.max.time()).timestamp())
+
+        logger.info("Fetching new-sales leads closed between %s and %s", target_date - window, target_date + window)
+        leads = self.get_leads(
+            closed_at_from=closed_from,
+            closed_at_to=closed_to,
             pipeline_ids=pipeline_ids,
             status_ids=won_status_ids,
         )
+        logger.debug("Got %d leads from API before date-field filter", len(leads))
 
         count_total = 0
         count_1d_3d = 0
         threshold = timedelta(days=3)
 
         for lead in leads:
+            # Filter by contract_date custom field
+            contract_val = self._get_custom_field_value(lead, contract_date_field_id)
+            if not self._field_matches_date(contract_val, day_start, day_end):
+                continue
+
             city = self._get_custom_field_value(lead, city_field_id)
             dept = self._get_custom_field_value(lead, department_field_id)
 
@@ -233,19 +246,21 @@ class AmoCRMClient:
         """
         Count active leads in given pipelines where end_of_classes = target_date,
         city=Астана, department=Оффлайн.
+
+        Fetches all leads in the pipelines and filters by end_date in Python.
         """
         day_start = int(datetime.combine(target_date, datetime.min.time()).timestamp())
         day_end = int(datetime.combine(target_date, datetime.max.time()).timestamp())
 
-        leads = self.get_leads_by_date_field(
-            field_id=end_date_field_id,
-            date_from=day_start,
-            date_to=day_end,
-            pipeline_ids=pipeline_ids,
-        )
+        logger.info("Fetching all leads in expires pipelines to filter by end_date")
+        leads = self.get_leads_by_pipeline(pipeline_ids=pipeline_ids)
+        logger.debug("Got %d leads from API before date-field filter", len(leads))
 
         count = 0
         for lead in leads:
+            end_val = self._get_custom_field_value(lead, end_date_field_id)
+            if not self._field_matches_date(end_val, day_start, day_end):
+                continue
             city = self._get_custom_field_value(lead, city_field_id)
             dept = self._get_custom_field_value(lead, department_field_id)
             if city == city_value and dept == department_value:
