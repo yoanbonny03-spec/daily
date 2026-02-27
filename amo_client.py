@@ -32,9 +32,17 @@ class AmoCRMClient:
 
     def __init__(self, domain: str, access_token: str):
         self.base_url = f"https://{domain}.amocrm.ru/api/v4"
+        self._access_token = access_token
         self.session = requests.Session()
         self.session.headers.update({
             "Authorization": f"Bearer {access_token}",
+            "Content-Type": "application/json",
+        })
+
+    def _new_session(self):
+        self.session = requests.Session()
+        self.session.headers.update({
+            "Authorization": f"Bearer {self._access_token}",
             "Content-Type": "application/json",
         })
 
@@ -42,6 +50,7 @@ class AmoCRMClient:
         """
         GET request. Builds query string with literal brackets (not %-encoded)
         because AmoCRM rejects %5B%5D-encoded bracket params.
+        Retries up to 3 times on ConnectionError with exponential backoff.
         """
         url = f"{self.base_url}{path}"
         if params:
@@ -50,7 +59,20 @@ class AmoCRMClient:
         else:
             full_url = url
 
-        resp = self.session.get(full_url, timeout=30)
+        max_retries = 3
+        for attempt in range(max_retries + 1):
+            try:
+                resp = self.session.get(full_url, timeout=30)
+                break
+            except requests.exceptions.ConnectionError as exc:
+                if attempt < max_retries:
+                    wait = 2 ** attempt
+                    logger.warning("ConnectionError (attempt %d/%d), retrying in %ds: %s",
+                                   attempt + 1, max_retries, wait, exc)
+                    time.sleep(wait)
+                    self._new_session()
+                else:
+                    raise
 
         if resp.status_code == 429:
             retry_after = int(resp.headers.get("Retry-After", 5))
