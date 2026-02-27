@@ -237,6 +237,17 @@ class AmoCRMClient:
                     result.append(s["id"])
         return result
 
+    def get_lost_status_ids(self, pipeline_ids: list[int]) -> set[int]:
+        """Return status IDs of type=3 (lost/rejected) for the given pipelines."""
+        result = set()
+        for p in self.get_pipelines():
+            if pipeline_ids and p["id"] not in pipeline_ids:
+                continue
+            for s in p.get("_embedded", {}).get("statuses", []):
+                if s.get("type") == 3:
+                    result.add(s["id"])
+        return result
+
     # ------------------------------------------------------------------
     # Business logic helpers
     # ------------------------------------------------------------------
@@ -303,12 +314,17 @@ class AmoCRMClient:
             closed_at_to=day_end,
         )
 
-        logger.info("count_new_sales: leads from API = %d, filtering by city/dept/contract_date in Python", len(leads))
+        # Исключаем "потерянные" сделки (type=3) — аналитика AmoCRM их не считает
+        lost_status_ids = self.get_lost_status_ids(pipeline_ids)
+        logger.info("count_new_sales: leads from API = %d, lost status IDs = %s", len(leads), lost_status_ids)
+
         count_total = 0
         count_1d_3d = 0
         threshold = timedelta(days=3)
 
         for lead in leads:
+            if lead.get("status_id") in lost_status_ids:
+                continue
             # Фильтр по городу и отделу через enum_id — надёжнее текстового сравнения
             if self._get_custom_field_enum_id(lead, city_field_id) != city_enum_id:
                 continue
