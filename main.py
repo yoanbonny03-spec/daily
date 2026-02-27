@@ -11,6 +11,9 @@ Usage:
     # Run for a specific date:
     python main.py --date 25.02.2026
 
+    # Dry run — show numbers without writing to spreadsheet:
+    python main.py --date 25.02.2026 --dry-run
+
     # Run as a scheduler (blocks, fires at 10:00 every day):
     python main.py --schedule
 """
@@ -35,7 +38,7 @@ logging.basicConfig(
 logger = logging.getLogger("daily_report")
 
 
-def run_for_date(target_date: date, cfg: dict) -> None:
+def run_for_date(target_date: date, cfg: dict, dry_run: bool = False) -> None:
     logger.info("=== Starting daily report for %s ===", target_date.strftime("%d.%m.%Y"))
 
     # ---- AmoCRM ----
@@ -135,6 +138,20 @@ def run_for_date(target_date: date, cfg: dict) -> None:
     upsales_revenue = sheets.get_upsales_revenue(payment_spreadsheet_id, target_date, weekly_plan_sheet)
     logger.info("Upsales revenue: %.2f", upsales_revenue)
 
+    # ---- Summary ----
+    logger.info("========== ИТОГО за %s ==========", target_date.strftime("%d.%m.%Y"))
+    logger.info("  New sales 1-3d  (R): %d", new_sales_1d3d)
+    logger.info("  New sales total (S): %d", new_sales_total)
+    logger.info("  Expires         (T): %d", expires)
+    logger.info("  Upsales purch   (U): %d", upsales_purch)
+    logger.info("  New sales rev   (V): %.2f", new_sales_revenue)
+    logger.info("  Upsales rev     (W): %.2f", upsales_revenue)
+    logger.info("=================================")
+
+    if dry_run:
+        logger.info("--dry-run: запись в таблицу пропущена.")
+        return
+
     # ---- Write to daily report ----
     logger.info("--- Шаг 6: запись в отчётную таблицу ---")
     ok = sheets.write_daily_report(
@@ -180,6 +197,11 @@ def main() -> None:
         action="store_true",
         help="Run as a daily scheduler (fires at 10:00 every day)",
     )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Fetch and print data without writing to Google Sheets",
+    )
     args = parser.parse_args()
 
     cfg = load_config()
@@ -200,7 +222,7 @@ def main() -> None:
         else:
             target_date = date.today() - timedelta(days=1)
 
-        run_for_date(target_date, cfg)
+        run_for_date(target_date, cfg, dry_run=args.dry_run)
 
 
 if __name__ == "__main__":
