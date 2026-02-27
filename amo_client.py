@@ -199,6 +199,7 @@ class AmoCRMClient:
                 params[f"filter[statuses][{i}][status_id]"] = sid
         return self._paginate("/leads", params)
 
+    def get_leads_by_date_field(
         self,
         field_id: int,
         date_from: int,
