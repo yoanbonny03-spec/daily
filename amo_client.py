@@ -162,7 +162,14 @@ class AmoCRMClient:
         if pipeline_ids:
             for i, pid in enumerate(pipeline_ids):
                 params[f"filter[pipeline_id][{i}]"] = pid
-        if status_ids:
+        if status_ids and pipeline_ids:
+            idx = 0
+            for pid in pipeline_ids:
+                for sid in status_ids:
+                    params[f"filter[statuses][{idx}][pipeline_id]"] = pid
+                    params[f"filter[statuses][{idx}][status_id]"] = sid
+                    idx += 1
+        elif status_ids:
             for i, sid in enumerate(status_ids):
                 params[f"filter[statuses][{i}][status_id]"] = sid
         return self._paginate("/leads", params)
@@ -313,10 +320,13 @@ class AmoCRMClient:
         logger.info("count_new_sales: date=%s, pipeline_ids=%s, won_statuses=%s",
                     target_date, pipeline_ids, won_status_ids)
 
-        leads = self.get_leads_by_date_field(
-            field_id=contract_date_field_id,
-            date_from=day_start,
-            date_to=day_end,
+        # AmoCRM custom-field date filters are slow/unreliable; use fast native
+        # closed_at filter with a ±60-day window, then filter by contract date in Python.
+        window_from = day_start - 60 * 86400
+        window_to   = day_end   + 7 * 86400
+        leads = self.get_leads(
+            closed_at_from=window_from,
+            closed_at_to=window_to,
             pipeline_ids=pipeline_ids,
             status_ids=won_status_ids,
         )
