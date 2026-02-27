@@ -97,6 +97,9 @@ def load_config() -> dict:
         # ID поля "Дата заключения договора" — используется для фильтрации новых продаж
         "AMO_CONTRACT_DATE_FIELD_ID": _require("AMO_CONTRACT_DATE_FIELD_ID"),
 
+        # ID поля "Новая заявка" (дата подачи заявки) — для расчёта 1d-3d
+        "AMO_NEW_REQUEST_FIELD_ID": _optional("AMO_NEW_REQUEST_FIELD_ID", "912755"),
+
         # Названия этапов сделки, которые считаются "договор подписан"
         # Скрипт сам найдёт их ID по названию внутри воронки
         "AMO_WON_STATUS_NAMES": _json_list("AMO_WON_STATUS_NAMES", default=[
