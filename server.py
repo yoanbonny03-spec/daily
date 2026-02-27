@@ -9,6 +9,7 @@ import os
 import socketserver
 import subprocess
 import sys
+import threading
 from datetime import date, timedelta
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from urllib.parse import parse_qs
@@ -68,21 +69,39 @@ class ThreadedHTTPServer(socketserver.ThreadingMixIn, HTTPServer):
 
 
 def _run_script(args: list, timeout: int = 180) -> tuple:
-    """Run a Python script as subprocess. Returns (output_text, returncode)."""
+    """Run a Python script as subprocess, streaming output to Railway logs in real time."""
     script_dir = os.path.dirname(os.path.abspath(__file__))
     cmd = [sys.executable] + args
     try:
-        result = subprocess.run(
+        proc = subprocess.Popen(
             cmd,
-            capture_output=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
             text=True,
             cwd=script_dir,
-            timeout=timeout,
         )
-        combined = (result.stdout + result.stderr).strip() or "(нет вывода)"
-        return combined, result.returncode
-    except subprocess.TimeoutExpired:
-        return f"Таймаут: скрипт выполнялся больше {timeout} секунд и был остановлен.", 1
+
+        lines = []
+
+        def _reader():
+            for line in proc.stdout:
+                print(line, end="", flush=True)  # stream to Railway logs
+                lines.append(line)
+
+        t = threading.Thread(target=_reader, daemon=True)
+        t.start()
+
+        try:
+            proc.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            t.join(timeout=2)
+            lines.append(f"\nТаймаут: скрипт выполнялся больше {timeout} секунд и был остановлен.")
+            return "".join(lines).strip(), 1
+
+        t.join(timeout=2)
+        combined = "".join(lines).strip() or "(нет вывода)"
+        return combined, proc.returncode
     except Exception as exc:
         return f"Ошибка запуска: {exc}", 1
 
