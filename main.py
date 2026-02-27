@@ -71,7 +71,7 @@ def run_for_date(target_date: date, cfg: dict) -> None:
     if not expires_pipeline_ids:
         expires_pipeline_ids = cfg.get("AMO_EXPIRES_PIPELINE_IDS", [])
 
-    # Custom field IDs and enum IDs for API-level city/dept filtering
+    # Custom field IDs and enum IDs for city/dept filtering
     city_field_id = int(cfg["AMO_CITY_FIELD_ID"])
     dept_field_id = int(cfg["AMO_DEPARTMENT_FIELD_ID"])
     city_enum_id = int(cfg["AMO_CITY_ENUM_ID"])
@@ -79,12 +79,18 @@ def run_for_date(target_date: date, cfg: dict) -> None:
     end_date_field_id = int(cfg["AMO_END_DATE_FIELD_ID"])
     contract_date_field_id = int(cfg["AMO_CONTRACT_DATE_FIELD_ID"])
 
+    # Resolve won status IDs — only leads in these 7 stages count as real sales
+    won_status_names = cfg.get("AMO_WON_STATUS_NAMES", [])
+    won_status_ids = amo.get_won_status_ids(sales_pipeline_ids, won_status_names)
+    logger.info("Won status IDs resolved: %s", won_status_ids)
+
     # 1. New sales purch 1d-3d (col R) + New sales purch total (col S)
     logger.info("--- Шаг 1: запрос новых продаж из AmoCRM ---")
     new_sales_1d3d, new_sales_total = amo.count_new_sales(
         target_date=target_date,
         pipeline_ids=sales_pipeline_ids,
         contract_date_field_id=contract_date_field_id,
+        won_status_ids=won_status_ids,
         city_field_id=city_field_id,
         city_enum_id=city_enum_id,
         dept_field_id=dept_field_id,

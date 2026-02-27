@@ -286,51 +286,46 @@ class AmoCRMClient:
         target_date: date,
         pipeline_ids: list[int],
         contract_date_field_id: int,
+        won_status_ids: list[int],
         city_field_id: int,
         city_enum_id: int,
         dept_field_id: int,
         dept_enum_id: int,
     ) -> tuple[int, int]:
         """
-        Returns (count_1d_3d, count_total) for leads where
-        дата_заключения_договора = target_date, город=Астана, отдел=Offline.
+        Returns (count_1d_3d, count_total) for leads where:
+          - этап сделки — один из 7 стадий реальной оплаты (фильтр API)
+          - дата заключения договора = target_date (проверка Python)
+          - город = Астана, отдел = Offline (проверка Python через enum_id)
 
-        Фильтр по городу и отделу применяется на уровне API через enum ID
-        (аналогично фильтру в AmoCRM UI). Дата договора проверяется в Python,
-        т.к. AmoCRM игнорирует filter[cf][date_field][from/to].
+        closed_at используется только как технический ограничитель (±30 дней)
+        чтобы не тянуть всю историю воронки — в бизнес-логику не входит.
         """
         day_start, day_end = _day_bounds_astana(target_date)
-        logger.info("count_new_sales: date=%s, pipeline_ids=%s", target_date, pipeline_ids)
+        logger.info("count_new_sales: date=%s, pipeline_ids=%s, won_statuses=%s",
+                    target_date, pipeline_ids, won_status_ids)
 
-        # closed_at ограничивает выборку на уровне API (надёжный стандартный фильтр).
-        # AmoCRM игнорирует filter[cf][date_field][from/to] и enum-фильтры,
-        # поэтому фильтрацию по городу, отделу и дате договора делаем в Python.
+        thirty_days = 30 * 24 * 3600
         leads = self.get_leads_by_date_field(
             field_id=contract_date_field_id,
             date_from=day_start,
             date_to=day_end,
             pipeline_ids=pipeline_ids,
-            closed_at_from=day_start,
-            closed_at_to=day_end,
+            status_ids=won_status_ids,
+            closed_at_from=day_start - thirty_days,
+            closed_at_to=day_end + thirty_days,
         )
 
-        # Исключаем "потерянные" сделки (type=3) — аналитика AmoCRM их не считает
-        lost_status_ids = self.get_lost_status_ids(pipeline_ids)
-        logger.info("count_new_sales: leads from API = %d, lost status IDs = %s", len(leads), lost_status_ids)
-
+        logger.info("count_new_sales: leads from API = %d, checking contract_date/city/dept in Python", len(leads))
         count_total = 0
         count_1d_3d = 0
         threshold = timedelta(days=3)
 
         for lead in leads:
-            if lead.get("status_id") in lost_status_ids:
-                continue
-            # Фильтр по городу и отделу через enum_id — надёжнее текстового сравнения
             if self._get_custom_field_enum_id(lead, city_field_id) != city_enum_id:
                 continue
             if self._get_custom_field_enum_id(lead, dept_field_id) != dept_enum_id:
                 continue
-            # Проверяем дату договора (API-фильтр по ней не работает)
             contract_date = self._get_custom_field_value(lead, contract_date_field_id)
             if not self._field_matches_date(contract_date, day_start, day_end):
                 continue
