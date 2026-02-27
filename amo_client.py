@@ -152,16 +152,15 @@ class AmoCRMClient:
         date_to: int,
         pipeline_ids: list[int] = None,
         status_ids: list[int] = None,
-        extra_cf_filters: dict = None,
+        closed_at_from: int = None,
+        closed_at_to: int = None,
     ) -> list:
         """
         Fetch leads where a custom date field is within [date_from, date_to].
 
-        extra_cf_filters: {field_id: value} — дополнительные фильтры по кастомным полям,
-        например {city_field_id: "Астана", dept_field_id: "Оффлайн"}.
-        Добавляются как filter[cf][field_id][]=value в запрос к AmoCRM.
-
-        Tries two AmoCRM date filter formats. If both return 400, raises RuntimeError.
+        closed_at_from / closed_at_to — дополнительный фильтр по стандартному полю
+        AmoCRM closed_at (дата закрытия сделки). Работает надёжно, в отличие от
+        фильтрации по значениям кастомных enum-полей.
         """
         base_params: dict = {}
         if pipeline_ids:
@@ -170,9 +169,10 @@ class AmoCRMClient:
         if status_ids:
             for i, sid in enumerate(status_ids):
                 base_params[f"filter[statuses][{i}][status_id]"] = sid
-        if extra_cf_filters:
-            for cf_id, cf_val in extra_cf_filters.items():
-                base_params[f"filter[cf][{cf_id}][]"] = cf_val
+        if closed_at_from is not None:
+            base_params["filter[closed_at][from]"] = closed_at_from
+        if closed_at_to is not None:
+            base_params["filter[closed_at][to]"] = closed_at_to
 
         filter_prefixes = [
             f"filter[cf][{field_id}]",
@@ -257,16 +257,17 @@ class AmoCRMClient:
             target_date, contract_date_field_id, day_start, day_end,
         )
 
+        # closed_at ограничивает выборку конкретным днём на уровне AmoCRM (стандартное поле,
+        # работает надёжно). Город/отдел фильтруются в Python ниже, потому что это
+        # enum-поля — их нельзя фильтровать по текстовому значению через API.
         leads = self.get_leads_by_date_field(
             field_id=contract_date_field_id,
             date_from=day_start,
             date_to=day_end,
             pipeline_ids=pipeline_ids,
             status_ids=won_status_ids,
-            extra_cf_filters={
-                city_field_id: city_value,
-                department_field_id: department_value,
-            },
+            closed_at_from=day_start,
+            closed_at_to=day_end,
         )
 
         count_total = 0
@@ -313,10 +314,6 @@ class AmoCRMClient:
             date_from=day_start,
             date_to=day_end,
             pipeline_ids=pipeline_ids,
-            extra_cf_filters={
-                city_field_id: city_value,
-                department_field_id: department_value,
-            },
         )
 
         count = 0
