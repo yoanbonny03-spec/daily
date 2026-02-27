@@ -318,6 +318,7 @@ class AmoCRMClient:
             date_from=day_start,
             date_to=day_end,
             pipeline_ids=pipeline_ids,
+            status_ids=won_status_ids,
         )
 
         logger.info("count_new_sales: leads from API = %d, filtering city/dept/status/contract_date in Python", len(leads))
