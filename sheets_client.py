@@ -197,18 +197,27 @@ class SheetsClient:
         date_short = target_date.strftime("%-d.%-m")          # e.g. "25.2"
         date_short2 = target_date.strftime("%d.%m")           # e.g. "25.02"
         date_long = target_date.strftime("%d.%m.%Y")          # e.g. "25.02.2026"
-        date_candidates = {date_short, date_short2, date_long}
+        _months_en = {
+            1: "January", 2: "February", 3: "March", 4: "April",
+            5: "May", 6: "June", 7: "July", 8: "August",
+            9: "September", 10: "October", 11: "November", 12: "December",
+        }
+        date_en = f"{_months_en[target_date.month]} {target_date.day}"  # e.g. "February 26"
+        date_candidates = {date_short, date_short2, date_long, date_en}
 
         city_col_idx = _col_letter_to_idx(city_col)
         date_col_idx = _col_letter_to_idx(date_col)
 
         target_row_idx = None  # 0-based
+        last_city = ""  # carry-forward for merged city cells
 
         for i, row in enumerate(all_values):
             city_cell = row[city_col_idx].strip() if len(row) > city_col_idx else ""
+            if city_cell:
+                last_city = city_cell
             date_cell = row[date_col_idx].strip() if len(row) > date_col_idx else ""
 
-            city_matches = city_cell == city_value
+            city_matches = last_city == city_value
             date_matches = date_cell in date_candidates
 
             if city_matches and date_matches:
