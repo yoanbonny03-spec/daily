@@ -173,8 +173,8 @@ def main() -> None:
     cfg = load_config()
 
     if args.schedule:
-        logger.info("Scheduler mode: will run every day at 10:00")
-        schedule.every().day.at("10:00").do(job, cfg=cfg)
+        logger.info("Scheduler mode: will run every day at 05:00 UTC (10:00 Astana)")
+        schedule.every().day.at("05:00").do(job, cfg=cfg)
         while True:
             schedule.run_pending()
             time.sleep(30)
