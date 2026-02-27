@@ -128,7 +128,7 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(enc)
 
     def log_message(self, fmt, *args):
-        pass  # silence default request logs
+        print(f"[HTTP] {self.address_string()} - {fmt % args}", flush=True)
 
 
 if __name__ == "__main__":
