@@ -204,12 +204,6 @@ def main() -> None:
 
     cfg = load_config()
 
-    # Env vars override CLI args (удобно для Railway — меняешь в Variables и редеплоишь)
-    import os
-    env_date = os.environ.get("REPORT_DATE")
-    env_dry_run = os.environ.get("DRY_RUN", "").lower() in ("1", "true", "yes")
-    dry_run = args.dry_run or env_dry_run
-
     if args.schedule:
         logger.info("Scheduler mode: will run every day at 05:00 UTC (10:00 Astana)")
         schedule.every().day.at("05:00").do(job, cfg=cfg)
@@ -217,10 +211,9 @@ def main() -> None:
             schedule.run_pending()
             time.sleep(30)
     else:
-        if args.date or env_date:
-            date_str = args.date or env_date
+        if args.date:
             try:
-                target_date = datetime.strptime(date_str, "%d.%m.%Y").date()
+                target_date = datetime.strptime(args.date, "%d.%m.%Y").date()
             except ValueError:
                 logger.error("Invalid date format. Use dd.mm.yyyy, e.g. 25.02.2026")
                 sys.exit(1)
