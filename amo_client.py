@@ -644,6 +644,65 @@ class AmoCRMClient:
 
         return count_1d_3d, count_total
 
+    def refresh_subscription_cache(
+        self,
+        pipeline_ids: list[int],
+        end_date_field_id: int,
+        city_field_id: int,
+        dept_field_id: int,
+    ) -> dict:
+        """Sync subscription leads cache to disk and return the leads dict.
+
+        - Full streaming sync if cache is missing or older than SUBSCRIPTION_CACHE_MAX_AGE_DAYS.
+        - Incremental sync (only updated_at >= last_sync) otherwise — usually 1-2 pages.
+
+        Call this from a scheduler every few hours so count_expires always has
+        a warm cache and never needs to do a full 90-second sync at report time.
+        """
+        pipeline_params: dict = {}
+        for i, pid in enumerate(pipeline_ids):
+            pipeline_params[f"filter[pipeline_id][{i}]"] = pid
+
+        cache = _load_subscription_cache()
+        last_sync: float = cache.get("_last_sync", 0.0)
+        leads_cache: dict = cache.get("leads", {})
+        cache_age_days = (time.time() - last_sync) / 86400
+
+        if cache_age_days > SUBSCRIPTION_CACHE_MAX_AGE_DAYS or not leads_cache:
+            logger.info(
+                "refresh_subscription_cache: full sync (age=%.1f days, %d leads) — streaming parallel fetch",
+                cache_age_days, len(leads_cache),
+            )
+            leads_cache = {}
+
+            def _store_batch(batch: list) -> None:
+                for lead in batch:
+                    leads_cache[str(lead["id"])] = {
+                        "end_date": self._get_custom_field_value(lead, end_date_field_id),
+                        "city":     self._get_custom_field_enum_id(lead, city_field_id),
+                        "dept":     self._get_custom_field_enum_id(lead, dept_field_id),
+                    }
+
+            total_fetched = self._paginate_parallel_stream("/leads", pipeline_params, on_batch=_store_batch)
+            logger.info("refresh_subscription_cache: full sync done, fetched=%d cached=%d", total_fetched, len(leads_cache))
+        else:
+            updated_from = int(last_sync) - 3600
+            inc_params = {**pipeline_params, "filter[updated_at][from]": updated_from}
+            updated_leads = self._paginate("/leads", inc_params)
+            for lead in updated_leads:
+                leads_cache[str(lead["id"])] = {
+                    "end_date": self._get_custom_field_value(lead, end_date_field_id),
+                    "city":     self._get_custom_field_enum_id(lead, city_field_id),
+                    "dept":     self._get_custom_field_enum_id(lead, dept_field_id),
+                }
+            logger.info(
+                "refresh_subscription_cache: incremental sync, %d leads updated, %d total cached",
+                len(updated_leads), len(leads_cache),
+            )
+
+        _save_subscription_cache({"_last_sync": time.time(), "_filter_works": False, "leads": leads_cache})
+        return leads_cache
+
     def count_expires(
         self,
         target_date: date,
@@ -674,10 +733,9 @@ class AmoCRMClient:
 
         # ── Load cache early — needed to decide whether to probe ─────────────
         cache = _load_subscription_cache()
-        last_sync: float = cache.get("_last_sync", 0.0)
-        leads_cache: dict = cache.get("leads", {})
-        cache_age_days = (time.time() - last_sync) / 86400
+        cache_age_days = (time.time() - cache.get("_last_sync", 0.0)) / 86400
         cached_filter_works: Optional[bool] = cache.get("_filter_works")
+        leads_cache: dict = cache.get("leads", {})
 
         # ── PROBE: try the date filter (skip if we already know it doesn't work) ──
         # If AmoCRM has "API filtering" enabled on field end_date_field_id,
@@ -750,39 +808,12 @@ class AmoCRMClient:
             return count
 
         # ── Slow path: date filter ignored by AmoCRM → use local cache ───────
-        if cache_age_days > SUBSCRIPTION_CACHE_MAX_AGE_DAYS or not leads_cache:
-            logger.info(
-                "count_expires: full cache sync (age=%.1f days, %d leads cached) — streaming parallel fetch",
-                cache_age_days, len(leads_cache),
-            )
-            leads_cache = {}
-
-            def _store_batch(batch: list) -> None:
-                for lead in batch:
-                    leads_cache[str(lead["id"])] = {
-                        "end_date": self._get_custom_field_value(lead, end_date_field_id),
-                        "city":     self._get_custom_field_enum_id(lead, city_field_id),
-                        "dept":     self._get_custom_field_enum_id(lead, dept_field_id),
-                    }
-
-            total_fetched = self._paginate_parallel_stream("/leads", pipeline_params, on_batch=_store_batch)
-            logger.info("count_expires: full sync done, fetched=%d cached=%d", total_fetched, len(leads_cache))
-        else:
-            updated_from = int(last_sync) - 3600
-            inc_params = {**pipeline_params, "filter[updated_at][from]": updated_from}
-            updated_leads = self._paginate("/leads", inc_params)
-            for lead in updated_leads:
-                leads_cache[str(lead["id"])] = {
-                    "end_date": self._get_custom_field_value(lead, end_date_field_id),
-                    "city":     self._get_custom_field_enum_id(lead, city_field_id),
-                    "dept":     self._get_custom_field_enum_id(lead, dept_field_id),
-                }
-            logger.info(
-                "count_expires: incremental sync, %d leads updated, %d total cached",
-                len(updated_leads), len(leads_cache),
-            )
-
-        _save_subscription_cache({"_last_sync": time.time(), "_filter_works": False, "leads": leads_cache})
+        leads_cache = self.refresh_subscription_cache(
+            pipeline_ids=pipeline_ids,
+            end_date_field_id=end_date_field_id,
+            city_field_id=city_field_id,
+            dept_field_id=dept_field_id,
+        )
 
         # ── Count from cache ─────────────────────────────────────────────────
         count = 0

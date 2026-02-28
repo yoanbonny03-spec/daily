@@ -178,6 +178,46 @@ def run_for_date(target_date: date, cfg: dict, dry_run: bool = False) -> None:
         sys.exit(1)
 
 
+def _build_amo_client(cfg: dict) -> "AmoCRMClient":
+    return AmoCRMClient(
+        domain=cfg["AMO_DOMAIN"],
+        access_token=cfg["AMO_ACCESS_TOKEN"],
+        client_id=cfg.get("AMO_CLIENT_ID"),
+        client_secret=cfg.get("AMO_CLIENT_SECRET"),
+        redirect_uri=cfg.get("AMO_REDIRECT_URI"),
+        refresh_token=cfg.get("AMO_REFRESH_TOKEN"),
+    )
+
+
+def cache_refresh_job(cfg: dict) -> None:
+    """Periodic job: keep subscription leads cache warm.
+
+    Runs every 6 hours in scheduler mode so that when the daily report job
+    fires at 05:00 UTC it only needs a fast incremental sync (seconds), not
+    a full 90-second parallel fetch.
+    """
+    try:
+        amo = _build_amo_client(cfg)
+        pipeline_map = amo.get_pipeline_map()
+        expires_pipeline_names = cfg.get("AMO_EXPIRES_PIPELINE_NAMES", [
+            "Ежемесячники (1 месяц)",
+            "Абонементы (3-6 месяцев)",
+            "До конца учебного года (7-12 месяцев)",
+        ])
+        expires_pipeline_ids = [pipeline_map[n] for n in expires_pipeline_names if n in pipeline_map]
+        if not expires_pipeline_ids:
+            expires_pipeline_ids = cfg.get("AMO_EXPIRES_PIPELINE_IDS", [])
+
+        amo.refresh_subscription_cache(
+            pipeline_ids=expires_pipeline_ids,
+            end_date_field_id=int(cfg["AMO_END_DATE_FIELD_ID"]),
+            city_field_id=int(cfg["AMO_CITY_FIELD_ID"]),
+            dept_field_id=int(cfg["AMO_DEPARTMENT_FIELD_ID"]),
+        )
+    except Exception:
+        logger.exception("Unhandled error in cache_refresh_job")
+
+
 def job(cfg: dict) -> None:
     """Scheduled job: fill report for yesterday."""
     yesterday = date.today() - timedelta(days=1)
@@ -209,8 +249,11 @@ def main() -> None:
     cfg = load_config()
 
     if args.schedule:
-        logger.info("Scheduler mode: will run every day at 05:00 UTC (10:00 Astana)")
+        logger.info("Scheduler mode: daily report at 05:00 UTC, cache refresh every 6 hours")
         schedule.every().day.at("05:00").do(job, cfg=cfg)
+        schedule.every(6).hours.do(cache_refresh_job, cfg=cfg)
+        # Warm up the cache immediately on startup (don't wait 6 hours)
+        cache_refresh_job(cfg)
         while True:
             schedule.run_pending()
             time.sleep(30)
