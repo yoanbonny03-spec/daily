@@ -428,16 +428,18 @@ class AmoCRMClient:
           - этап сделки — один из 7 стадий (проверка Python через status_id)
 
         count_1d_3d: |дата_договора − дата_создания_лида| ≤ 3 дня.
-        Никакого фильтра по closed_at или статусам на уровне API — тянем
-        всё по дате договора, остальное проверяем в Python.
+        Фильтр по дате договора выполняется на уровне API, остальное — в Python.
         """
         day_start, day_end = _day_bounds_astana(target_date)
         logger.info("count_new_sales: date=%s, pipeline_ids=%s, won_statuses=%s",
                     target_date, pipeline_ids, won_status_ids)
 
-        # Эти этапы — активные стадии воронки, closed_at у них не выставляется.
-        # Берём все лиды в нужных стадиях и фильтруем по дате договора в Python.
-        leads = self.get_leads_by_status(
+        # Фильтруем по полю "дата договора" прямо на уровне API — так тянем только
+        # лиды с нужной датой, а не все сделки воронки за всё время.
+        leads = self.get_leads_by_date_field(
+            field_id=contract_date_field_id,
+            date_from=day_start,
+            date_to=day_end,
             pipeline_ids=pipeline_ids,
             status_ids=won_status_ids,
         )
