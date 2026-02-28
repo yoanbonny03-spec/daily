@@ -195,6 +195,7 @@ class AmoCRMClient:
                 break
             batch = items[key]
             results.extend(batch)
+            logger.debug("_paginate %s page=%d batch=%d total=%d", path, page, len(batch), len(results))
             if len(batch) < 250:
                 break
             if max_pages and page >= max_pages:
@@ -298,6 +299,8 @@ class AmoCRMClient:
         status_ids: list[int] = None,
         closed_at_from: int = None,
         closed_at_to: int = None,
+        updated_at_from: int = None,
+        updated_at_to: int = None,
         enum_filters: dict = None,
     ) -> list:
         """
@@ -323,6 +326,10 @@ class AmoCRMClient:
             base_params["filter[closed_at][from]"] = closed_at_from
         if closed_at_to is not None:
             base_params["filter[closed_at][to]"] = closed_at_to
+        if updated_at_from is not None:
+            base_params["filter[updated_at][from]"] = updated_at_from
+        if updated_at_to is not None:
+            base_params["filter[updated_at][to]"] = updated_at_to
         if enum_filters:
             for cf_id, enum_id in enum_filters.items():
                 base_params[f"filter[cf][{cf_id}][0]"] = enum_id
@@ -434,14 +441,19 @@ class AmoCRMClient:
         logger.info("count_new_sales: date=%s, pipeline_ids=%s, won_statuses=%s",
                     target_date, pipeline_ids, won_status_ids)
 
-        # Фильтруем по полю "дата договора" прямо на уровне API — так тянем только
-        # лиды с нужной датой, а не все сделки воронки за всё время.
+        # Фильтруем на уровне API:
+        #   1. pipeline + statuses (работает надёжно)
+        #   2. updated_at >= start of target_date — сделка с датой договора = today
+        #      была обновлена именно сегодня; отсекаем весь исторический хвост
+        #   3. custom date field filter (может игнорироваться amoCRM, но пробуем)
+        # Итоговый Python-фильтр по дате договора страхует от false positives.
         leads = self.get_leads_by_date_field(
             field_id=contract_date_field_id,
             date_from=day_start,
             date_to=day_end,
             pipeline_ids=pipeline_ids,
             status_ids=won_status_ids,
+            updated_at_from=day_start,
         )
 
         logger.info("count_new_sales: leads from API = %d, filtering city/dept/status/contract_date in Python", len(leads))
