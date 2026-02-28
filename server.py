@@ -165,7 +165,7 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def _scheduler_thread():
-    """Background thread: daily report at 10:00 Astana (05:00 UTC) + cache warm-up every 6h."""
+    """Background thread: daily report at 10:00 Astana (05:00 UTC) + cache refresh at 03:00 Astana (22:00 UTC)."""
 
     def _daily_job():
         print("[scheduler] Starting daily report job", flush=True)
@@ -176,14 +176,16 @@ def _scheduler_thread():
 
     def _cache_job():
         print("[scheduler] Starting cache refresh", flush=True)
-        _run_script(["main.py", "--cache-refresh"], timeout=300)
+        _run_script(["main.py", "--cache-refresh"], timeout=600)
         print("[scheduler] Cache refresh done", flush=True)
 
-    # Astana is UTC+5 → 10:00 Astana = 05:00 UTC
+    # Astana is UTC+5:
+    #   10:00 Astana = 05:00 UTC → daily report
+    #   03:00 Astana = 22:00 UTC (prev day) → cache refresh (fresh for the morning report)
     schedule.every().day.at("05:00").do(_daily_job)
-    schedule.every(6).hours.do(_cache_job)
+    schedule.every().day.at("22:00").do(_cache_job)
 
-    # Warm up cache immediately so the first daily job is fast
+    # Warm up cache on startup if it is not yet populated
     _cache_job()
 
     while True:

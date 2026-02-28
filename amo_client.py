@@ -242,7 +242,7 @@ class AmoCRMClient:
         return results
 
     def _paginate_parallel_stream(
-        self, path: str, params: dict, on_batch, max_workers: int = 5
+        self, path: str, params: dict, on_batch, max_workers: int = 3
     ) -> int:
         """Fetch all pages in parallel batches and call on_batch(items) for each batch.
 
@@ -271,12 +271,31 @@ class AmoCRMClient:
             page_params = {**params, "page": page_num, "limit": 250}
             qs = "&".join(f"{k}={v}" for k, v in page_params.items())
             full_url = f"{base_url}{path}?{qs}"
-            for _ in range(3):
-                resp = _session().get(full_url, timeout=30)
-                if resp.status_code == 429:
-                    time.sleep(int(resp.headers.get("Retry-After", 5)))
-                    continue
-                break
+            resp = None
+            last_exc: Exception | None = None
+            for attempt in range(5):
+                try:
+                    resp = _session().get(full_url, timeout=30)
+                    if resp.status_code == 429:
+                        time.sleep(int(resp.headers.get("Retry-After", 5)))
+                        resp = None
+                        continue
+                    break
+                except requests.exceptions.ConnectionError as exc:
+                    last_exc = exc
+                    wait = 2 ** attempt  # 1s, 2s, 4s, 8s, 16s
+                    logger.warning(
+                        "fetch_page p=%d attempt=%d connection error, retry in %ds: %s",
+                        page_num, attempt + 1, wait, exc,
+                    )
+                    time.sleep(wait)
+                    # Drop the broken session so the next attempt opens a fresh connection
+                    if hasattr(_local, "s"):
+                        del _local.s
+            if resp is None:
+                raise requests.exceptions.ConnectionError(
+                    f"fetch_page p={page_num}: all retries exhausted"
+                ) from last_exc
             if resp.status_code == 204:
                 return page_num, []
             resp.raise_for_status()
@@ -808,11 +827,17 @@ class AmoCRMClient:
             return count
 
         # ── Slow path: date filter ignored by AmoCRM → use local cache ───────
-        leads_cache = self.refresh_subscription_cache(
-            pipeline_ids=pipeline_ids,
-            end_date_field_id=end_date_field_id,
-            city_field_id=city_field_id,
-            dept_field_id=dept_field_id,
+        # Cache is populated by the daily --cache-refresh scheduler job.
+        # Do NOT refresh here so manual and scheduled report runs stay fast.
+        if not leads_cache:
+            logger.warning(
+                "count_expires: cache is empty — returning 0. "
+                "The scheduler will populate it on the next --cache-refresh run."
+            )
+            return 0
+        logger.info(
+            "count_expires: using cached %d leads (age=%.1f days)",
+            len(leads_cache), cache_age_days,
         )
 
         # ── Count from cache ─────────────────────────────────────────────────
