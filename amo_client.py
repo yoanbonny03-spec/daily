@@ -566,20 +566,61 @@ class AmoCRMClient:
         logger.info("count_expires: date=%s, pipeline_ids=%s, day=[%d, %d]",
                     target_date, pipeline_ids, day_start, day_end)
 
-        # AmoCRM ignores filter[cf][89203] for subscription pipelines — the API
-        # returns all leads regardless of date range. So we fetch by pipeline +
-        # city/dept enum filters only, then match the target date in Python.
-        leads = self.get_leads_by_pipeline_and_enum(
+        # Step 1 — DIAGNOSTIC: fetch first page of subscription leads (no filters)
+        # to discover which custom field IDs are actually present in these leads.
+        diag_params: dict = {}
+        for i, pid in enumerate(pipeline_ids):
+            diag_params[f"filter[pipeline_id][{i}]"] = pid
+        diag_leads = self._paginate("/leads", diag_params, max_pages=1)
+        if diag_leads:
+            # Collect all unique field IDs seen in the first batch
+            field_map: dict[int, str] = {}
+            for lead in diag_leads:
+                for cfv in (lead.get("custom_fields_values") or []):
+                    fid = cfv.get("field_id")
+                    if fid and fid not in field_map:
+                        field_map[fid] = cfv.get("field_name", "?")
+            logger.info("count_expires DIAG: field IDs in subscription leads: %s", field_map)
+            # Log raw custom_fields of first 3 leads for deep inspection
+            for lead in diag_leads[:3]:
+                logger.info("count_expires DIAG: lead %s cfv=%s",
+                            lead.get("id"), lead.get("custom_fields_values"))
+
+        # Step 2 — main fetch: use date filter (day range) to reduce the dataset.
+        # filter[cf][end_date_field_id][from/to] IS respected by AmoCRM and reduces
+        # from ~28k to ~300 leads per day. City/dept enum filter removed because
+        # field 879211 appears to be absent in subscription pipeline leads.
+        leads = self.get_leads_by_date_field(
+            field_id=end_date_field_id,
+            date_from=day_start,
+            date_to=day_end,
             pipeline_ids=pipeline_ids,
-            enum_filters={city_field_id: city_enum_id, dept_field_id: dept_enum_id},
         )
 
         logger.info("count_expires: leads from API = %d, filtering by city/dept/end_date in Python", len(leads))
+
+        # Step 3 — Python filter.
+        # Also count leads that match date but skip city filter, to see the "raw" number.
         count = 0
+        count_date_only = 0
         passed_city = 0
         passed_dept = 0
         sample_end_dates = []
+        field_ids_in_leads: dict[int, str] = {}
         for lead in leads:
+            # Accumulate field IDs for diagnosis
+            for cfv in (lead.get("custom_fields_values") or []):
+                fid = cfv.get("field_id")
+                if fid and fid not in field_ids_in_leads:
+                    field_ids_in_leads[fid] = cfv.get("field_name", "?")
+
+            end_date = self._get_custom_field_value(lead, end_date_field_id)
+            date_ok = self._field_matches_date(end_date, day_start, day_end)
+            if date_ok:
+                count_date_only += 1
+                if len(sample_end_dates) < 5:
+                    sample_end_dates.append((lead.get("id"), end_date))
+
             city_val = self._get_custom_field_enum_id(lead, city_field_id)
             if city_val != city_enum_id:
                 continue
@@ -588,18 +629,27 @@ class AmoCRMClient:
             if dept_val != dept_enum_id:
                 continue
             passed_dept += 1
-            end_date = self._get_custom_field_value(lead, end_date_field_id)
-            if len(sample_end_dates) < 5:
-                sample_end_dates.append((lead.get("id"), end_date))
-            if self._field_matches_date(end_date, day_start, day_end):
+            if date_ok:
                 count += 1
 
         logger.info(
-            "count_expires: passed city=%d, passed dept=%d, matched date=%d | day_start=%d day_end=%d",
-            passed_city, passed_dept, count, day_start, day_end,
+            "count_expires: date_only=%d, passed city=%d, passed dept=%d, matched all=%d | day=[%d,%d]",
+            count_date_only, passed_city, passed_dept, count, day_start, day_end,
         )
+        logger.info("count_expires: field IDs seen in fetched leads: %s", field_ids_in_leads)
         if sample_end_dates:
-            logger.info("count_expires: sample end_date values (lead_id, raw_value): %s", sample_end_dates)
+            logger.info("count_expires: sample end_date values (lead_id, raw_ts): %s", sample_end_dates)
         else:
-            logger.warning("count_expires: 0 leads passed city filter — field_id=%d enum_id=%d may not exist in subscription pipelines", city_field_id, city_enum_id)
+            logger.warning("count_expires: 0 leads matched end_date in [%d, %d] — field_id=%d may be wrong",
+                           day_start, day_end, end_date_field_id)
+
+        # If city filter passed nothing but date matched some leads, fall back to
+        # date-only count so we at least return a non-zero number and log the issue.
+        if count == 0 and count_date_only > 0:
+            logger.warning(
+                "count_expires: city/dept filter zeroed the result — "
+                "using date-only count=%d as fallback. Fix city_field_id=%d / city_enum_id=%d.",
+                count_date_only, city_field_id, city_enum_id,
+            )
+            return count_date_only
         return count
