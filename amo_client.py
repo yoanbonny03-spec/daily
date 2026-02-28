@@ -1,10 +1,13 @@
 """
 AmoCRM API client for fetching sales and lead data.
 
-OAuth2 authentication with automatic token refresh:
-  - On startup loads tokens from tokens.json (if exists)
-  - On 401 response automatically refreshes via refresh_token
-  - Saves updated tokens back to tokens.json after each refresh
+Аутентификация:
+  - AMO_ACCESS_TOKEN = "Долгосрочный токен" из настроек интеграции amoCRM
+    (Настройки → Интеграции → ваша интеграция → вкладка "Ключи и токены")
+  - Долгосрочный токен используется напрямую как Bearer token
+  - При истечении (401) токен нужно обновить вручную в amoCRM и заменить в Railway
+  - Опционально: если заданы AMO_CLIENT_ID/SECRET/REDIRECT_URI/REFRESH_TOKEN —
+    клиент попробует автоматически обновить токен через OAuth2 refresh flow
 """
 
 import json
@@ -53,16 +56,21 @@ def _save_tokens(tokens: dict) -> None:
 
 
 class AmoCRMClient:
-    """Client for AmoCRM REST API v4 with OAuth2 token auto-refresh."""
+    """Client for AmoCRM REST API v4.
+
+    Использует Долгосрочный токен как Bearer access_token.
+    При наличии OAuth2 credentials (client_id/secret/refresh_token) —
+    автоматически обновляет токен при 401.
+    """
 
     def __init__(
         self,
         domain: str,
-        client_id: str,
-        client_secret: str,
-        redirect_uri: str,
-        refresh_token: str,
-        access_token: str = None,
+        access_token: str,
+        client_id: str = None,
+        client_secret: str = None,
+        redirect_uri: str = None,
+        refresh_token: str = None,
     ):
         self.domain = domain
         self.base_url = f"https://{domain}.amocrm.ru/api/v4"
@@ -71,16 +79,12 @@ class AmoCRMClient:
         self._client_secret = client_secret
         self._redirect_uri = redirect_uri
 
-        # Prefer saved tokens, fall back to env vars
+        # Prefer saved tokens from previous refresh, fall back to provided value
         saved = _load_tokens()
         self._access_token = saved.get("access_token") or access_token
         self._refresh_token = saved.get("refresh_token") or refresh_token
 
-        if not self._access_token:
-            logger.info("No access_token found, refreshing via refresh_token...")
-            self._refresh()
-        else:
-            self._build_session()
+        self._build_session()
 
     def _build_session(self) -> None:
         self.session = requests.Session()
@@ -91,7 +95,13 @@ class AmoCRMClient:
 
     def _refresh(self) -> None:
         """Exchange refresh_token for a new access_token + refresh_token."""
-        logger.info("Refreshing AmoCRM access token...")
+        if not all([self._client_id, self._client_secret, self._redirect_uri, self._refresh_token]):
+            raise RuntimeError(
+                "AmoCRM access token expired (401). "
+                "Обнови Долгосрочный токен в amoCRM (Настройки → Интеграции → "
+                "ваша интеграция → Ключи и токены) и обнови AMO_ACCESS_TOKEN в Railway."
+            )
+        logger.info("Refreshing AmoCRM access token via refresh_token...")
         resp = requests.post(
             self._oauth_url,
             json={
