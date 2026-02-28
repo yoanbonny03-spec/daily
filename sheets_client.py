@@ -25,6 +25,11 @@ PAYMENT_TYPE_COL = 5   # Column F
 PAYMENT_DATE_COL = 8   # Column I
 PAYMENT_TYPE_VALUE = "Повторные продажи"
 
+KASPI_TYPE_COL   = 6   # Column G  — "Рассрочка"
+KASPI_AMOUNT_COL = 1   # Column B  — payment amount
+KASPI_DATE_COL   = 9   # Column J  — date
+KASPI_TYPE_VALUE = "Рассрочка"
+
 # Row indices (1-based) in "План еженедельный" sheet
 DATE_FROM_ROW = 2
 DATE_FROM_COL = "A"   # A2
@@ -93,6 +98,40 @@ class SheetsClient:
                     total += 1
 
         logger.info("Upsales purchases on %s: %d", target_date, total)
+        return total
+
+    def get_kaspi_revenue(self, spreadsheet_id: str, target_date: date) -> float:
+        """
+        Sum column B across all employee sheets where:
+          column G == "Рассрочка"  AND  column J == target_date
+        """
+        ss = self._open_spreadsheet(spreadsheet_id)
+        target_str = target_date.strftime("%d.%m.%Y")
+        total = 0.0
+
+        for ws in ss.worksheets():
+            if ws.title in NON_EMPLOYEE_SHEETS:
+                continue
+
+            try:
+                all_values = ws.get_all_values()
+            except Exception as exc:
+                logger.warning("Could not read sheet %s: %s", ws.title, exc)
+                continue
+
+            sheet_sum = 0.0
+            for row in all_values[1:]:
+                if len(row) <= KASPI_DATE_COL:
+                    continue
+                kaspi_type = row[KASPI_TYPE_COL].strip()
+                payment_date = row[KASPI_DATE_COL].strip()
+                if kaspi_type == KASPI_TYPE_VALUE and payment_date == target_str:
+                    sheet_sum += self._parse_number(row[KASPI_AMOUNT_COL])
+            if sheet_sum:
+                logger.debug("Sheet %s kaspi revenue: %.2f", ws.title, sheet_sum)
+            total += sheet_sum
+
+        logger.info("Kaspi revenue on %s: %.2f", target_date, total)
         return total
 
     # ------------------------------------------------------------------
@@ -168,13 +207,14 @@ class SheetsClient:
         upsales_purch: int,
         new_sales_revenue: float,
         upsales_revenue: float,
+        kaspi_revenue: float = 0.0,
         city_col: str = "A",
         date_col: str = "B",
         city_value: str = "Астана",
     ) -> bool:
         """
         Find the row in the report sheet matching city=Астана and target_date,
-        then write values to columns R-W.
+        then write values to columns R-W and Y.
 
         Layout assumed:
           A  = city name
@@ -185,6 +225,7 @@ class SheetsClient:
           U  = upsales_purch
           V  = new_sales_revenue
           W  = upsales_revenue
+          Y  = kaspi_revenue
 
         Returns True if row was found and updated.
         """
@@ -247,6 +288,7 @@ class SheetsClient:
             ("U", upsales_purch),
             ("V", new_sales_revenue),
             ("W", upsales_revenue),
+            ("Y", kaspi_revenue),
         ]
 
         for col_letter, value in updates:
@@ -254,10 +296,10 @@ class SheetsClient:
             logger.debug("Wrote %s to %s%d", value, col_letter, sheet_row)
 
         logger.info(
-            "Updated row %d for %s / %s: R=%s S=%s T=%s U=%s V=%s W=%s",
+            "Updated row %d for %s / %s: R=%s S=%s T=%s U=%s V=%s W=%s Y=%s",
             sheet_row, city_value, target_date,
             new_sales_1d3d, new_sales_total, expires,
-            upsales_purch, new_sales_revenue, upsales_revenue,
+            upsales_purch, new_sales_revenue, upsales_revenue, kaspi_revenue,
         )
         return True
 
