@@ -333,7 +333,7 @@ class AmoCRMClient:
             base_params["filter[updated_at][to]"] = updated_at_to
         if enum_filters:
             for cf_id, enum_id in enum_filters.items():
-                base_params[f"filter[cf][{cf_id}][0]"] = enum_id
+                base_params[f"filter[cf][{cf_id}][]"] = enum_id
 
         filter_prefixes = [
             f"filter[cf][{field_id}]",
@@ -382,6 +382,23 @@ class AmoCRMClient:
             for s in p.get("_embedded", {}).get("statuses", []):
                 if s.get("type") == 3:
                     result.add(s["id"])
+        return result
+
+    def get_open_status_ids(self, pipeline_ids: list[int]) -> list[int]:
+        """Return status IDs for active (non-terminal) stages in given pipelines.
+
+        Excludes type=3 (lost), type=142 (won), type=143 (lost/fail) — i.e. keeps
+        only the regular in-progress stages. Used to avoid downloading historical
+        closed leads when only active subscriptions are needed.
+        """
+        terminal_types = {3, 142, 143}
+        result = []
+        for p in self.get_pipelines():
+            if pipeline_ids and p["id"] not in pipeline_ids:
+                continue
+            for s in p.get("_embedded", {}).get("statuses", []):
+                if s.get("type") not in terminal_types:
+                    result.append(s["id"])
         return result
 
     # ------------------------------------------------------------------
@@ -514,13 +531,16 @@ class AmoCRMClient:
         day_start, day_end = _day_bounds_astana(target_date)
         logger.info("count_expires: date=%s, pipeline_ids=%s", target_date, pipeline_ids)
 
+        open_status_ids = self.get_open_status_ids(pipeline_ids)
+        logger.info("count_expires: active status_ids=%s", open_status_ids)
+
         leads = self.get_leads_by_date_field(
             field_id=end_date_field_id,
             date_from=day_start,
             date_to=day_end,
             pipeline_ids=pipeline_ids,
+            status_ids=open_status_ids,
             enum_filters={city_field_id: city_enum_id, dept_field_id: dept_enum_id},
-            max_pages=8,
         )
 
         logger.info("count_expires: leads from API = %d, filtering by city/dept/end_date in Python", len(leads))
