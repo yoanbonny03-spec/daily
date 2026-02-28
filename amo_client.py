@@ -531,15 +531,11 @@ class AmoCRMClient:
         day_start, day_end = _day_bounds_astana(target_date)
         logger.info("count_expires: date=%s, pipeline_ids=%s", target_date, pipeline_ids)
 
-        open_status_ids = self.get_open_status_ids(pipeline_ids)
-        logger.info("count_expires: active status_ids=%s", open_status_ids)
-
         leads = self.get_leads_by_date_field(
             field_id=end_date_field_id,
             date_from=day_start,
             date_to=day_end,
             pipeline_ids=pipeline_ids,
-            status_ids=open_status_ids,
             enum_filters={city_field_id: city_enum_id, dept_field_id: dept_enum_id},
         )
 
