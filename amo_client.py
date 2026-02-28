@@ -39,6 +39,21 @@ def _day_bounds_astana(target_date: date) -> tuple[int, int]:
     return day_start, day_end
 
 
+def _month_bounds_astana(target_date: date) -> tuple[int, int]:
+    """
+    Return (month_start, month_end) as unix timestamps for the whole month
+    of target_date in Astana local time (UTC+5).
+    """
+    month_start = int(datetime(target_date.year, target_date.month, 1,
+                               0, 0, 0, tzinfo=ASTANA_TZ).timestamp())
+    if target_date.month == 12:
+        next_month = datetime(target_date.year + 1, 1, 1, 0, 0, 0, tzinfo=ASTANA_TZ)
+    else:
+        next_month = datetime(target_date.year, target_date.month + 1, 1, 0, 0, 0, tzinfo=ASTANA_TZ)
+    month_end = int(next_month.timestamp()) - 1
+    return month_start, month_end
+
+
 def _load_tokens() -> dict:
     """Load saved tokens from tokens.json."""
     if TOKENS_FILE.exists():
@@ -529,12 +544,18 @@ class AmoCRMClient:
         Дата окончания проверяется в Python.
         """
         day_start, day_end = _day_bounds_astana(target_date)
+        month_start, month_end = _month_bounds_astana(target_date)
         logger.info("count_expires: date=%s, pipeline_ids=%s", target_date, pipeline_ids)
+        logger.info("count_expires: API filter month range [%d, %d], exact day [%d, %d]",
+                    month_start, month_end, day_start, day_end)
 
+        # Use full-month range for the API date filter: AmoCRM may ignore a narrow
+        # 24-hour window but respect a monthly range. City/dept enum filters further
+        # reduce the result set. Python then matches the exact target date.
         leads = self.get_leads_by_date_field(
             field_id=end_date_field_id,
-            date_from=day_start,
-            date_to=day_end,
+            date_from=month_start,
+            date_to=month_end,
             pipeline_ids=pipeline_ids,
             enum_filters={city_field_id: city_enum_id, dept_field_id: dept_enum_id},
         )
