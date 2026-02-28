@@ -241,11 +241,17 @@ class AmoCRMClient:
             page += 1
         return results
 
-    def _paginate_parallel(self, path: str, params: dict, max_workers: int = 5) -> list:
-        """Fetch all pages in parallel batches — ~5x faster than sequential.
+    def _paginate_parallel_stream(
+        self, path: str, params: dict, on_batch, max_workers: int = 5
+    ) -> int:
+        """Fetch all pages in parallel batches and call on_batch(items) for each batch.
 
-        Uses per-thread requests.Session objects (all sharing the same Bearer token).
-        Handles AmoCRM's HTTP 204 (no more pages) and 429 (rate limit) per page.
+        Unlike _paginate which accumulates everything in RAM, this processes and
+        discards each batch immediately — peak memory = 1 batch (~6 MB) instead of
+        all pages at once (~600 MB for 28k leads). Returns total items processed.
+
+        Uses per-thread requests.Session (same Bearer token, thread-safe reads).
+        Handles HTTP 204 (no more pages) and 429 (rate limit).
         """
         token = self._access_token
         base_url = self.base_url
@@ -279,31 +285,39 @@ class AmoCRMClient:
             key = next(iter(items_dict), None)
             return page_num, (items_dict[key] if key else [])
 
-        page_data: dict[int, list] = {}
+        total = 0
         page = 1
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
             while True:
-                batch = list(range(page, page + max_workers))
-                futures = {executor.submit(fetch_page, p): p for p in batch}
+                batch_pages = list(range(page, page + max_workers))
+                futures = {executor.submit(fetch_page, p): p for p in batch_pages}
+
+                # Collect results ordered by page so on_batch sees them in order
+                batch_results: dict[int, list] = {}
                 last_in_batch = None
                 for fut in as_completed(futures):
                     p, items = fut.result()
-                    page_data[p] = items
+                    batch_results[p] = items
                     if len(items) < 250:
                         last_in_batch = p
-                total_so_far = sum(len(v) for v in page_data.values())
+
+                # Process in page order then immediately discard raw data
+                for p in sorted(batch_results):
+                    items = batch_results[p]
+                    if items:
+                        on_batch(items)
+                        total += len(items)
+                batch_results.clear()
+
                 logger.info(
-                    "_paginate_parallel %s pages %d-%d fetched, running total=%d",
-                    path, batch[0], batch[-1], total_so_far,
+                    "_paginate_parallel_stream %s pages %d-%d done, running total=%d",
+                    path, batch_pages[0], batch_pages[-1], total,
                 )
                 if last_in_batch is not None:
                     break
                 page += max_workers
 
-        result: list = []
-        for p in sorted(page_data.keys()):
-            result.extend(page_data[p])
-        return result
+        return total
 
     # ------------------------------------------------------------------
     # Custom fields helpers
@@ -738,18 +752,21 @@ class AmoCRMClient:
         # ── Slow path: date filter ignored by AmoCRM → use local cache ───────
         if cache_age_days > SUBSCRIPTION_CACHE_MAX_AGE_DAYS or not leads_cache:
             logger.info(
-                "count_expires: full cache sync (age=%.1f days, %d leads cached) — parallel fetch",
+                "count_expires: full cache sync (age=%.1f days, %d leads cached) — streaming parallel fetch",
                 cache_age_days, len(leads_cache),
             )
-            all_leads = self._paginate_parallel("/leads", pipeline_params)
             leads_cache = {}
-            for lead in all_leads:
-                leads_cache[str(lead["id"])] = {
-                    "end_date": self._get_custom_field_value(lead, end_date_field_id),
-                    "city":     self._get_custom_field_enum_id(lead, city_field_id),
-                    "dept":     self._get_custom_field_enum_id(lead, dept_field_id),
-                }
-            logger.info("count_expires: full sync done, %d leads cached", len(leads_cache))
+
+            def _store_batch(batch: list) -> None:
+                for lead in batch:
+                    leads_cache[str(lead["id"])] = {
+                        "end_date": self._get_custom_field_value(lead, end_date_field_id),
+                        "city":     self._get_custom_field_enum_id(lead, city_field_id),
+                        "dept":     self._get_custom_field_enum_id(lead, dept_field_id),
+                    }
+
+            total_fetched = self._paginate_parallel_stream("/leads", pipeline_params, on_batch=_store_batch)
+            logger.info("count_expires: full sync done, fetched=%d cached=%d", total_fetched, len(leads_cache))
         else:
             updated_from = int(last_sync) - 3600
             inc_params = {**pipeline_params, "filter[updated_at][from]": updated_from}
