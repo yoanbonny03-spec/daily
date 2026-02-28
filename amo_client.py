@@ -13,6 +13,8 @@ AmoCRM API client for fetching sales and lead data.
 import json
 import time
 import logging
+import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, date, timedelta, timezone
 from pathlib import Path
 from typing import Optional
@@ -238,6 +240,70 @@ class AmoCRMClient:
                 break
             page += 1
         return results
+
+    def _paginate_parallel(self, path: str, params: dict, max_workers: int = 5) -> list:
+        """Fetch all pages in parallel batches — ~5x faster than sequential.
+
+        Uses per-thread requests.Session objects (all sharing the same Bearer token).
+        Handles AmoCRM's HTTP 204 (no more pages) and 429 (rate limit) per page.
+        """
+        token = self._access_token
+        base_url = self.base_url
+        _local = threading.local()
+
+        def _session() -> requests.Session:
+            if not hasattr(_local, "s"):
+                s = requests.Session()
+                s.headers.update({
+                    "Authorization": f"Bearer {token}",
+                    "Content-Type": "application/json",
+                })
+                _local.s = s
+            return _local.s
+
+        def fetch_page(page_num: int) -> tuple[int, list]:
+            page_params = {**params, "page": page_num, "limit": 250}
+            qs = "&".join(f"{k}={v}" for k, v in page_params.items())
+            full_url = f"{base_url}{path}?{qs}"
+            for _ in range(3):
+                resp = _session().get(full_url, timeout=30)
+                if resp.status_code == 429:
+                    time.sleep(int(resp.headers.get("Retry-After", 5)))
+                    continue
+                break
+            if resp.status_code == 204:
+                return page_num, []
+            resp.raise_for_status()
+            data = resp.json()
+            items_dict = data.get("_embedded", {})
+            key = next(iter(items_dict), None)
+            return page_num, (items_dict[key] if key else [])
+
+        page_data: dict[int, list] = {}
+        page = 1
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            while True:
+                batch = list(range(page, page + max_workers))
+                futures = {executor.submit(fetch_page, p): p for p in batch}
+                last_in_batch = None
+                for fut in as_completed(futures):
+                    p, items = fut.result()
+                    page_data[p] = items
+                    if len(items) < 250:
+                        last_in_batch = p
+                total_so_far = sum(len(v) for v in page_data.values())
+                logger.info(
+                    "_paginate_parallel %s pages %d-%d fetched, running total=%d",
+                    path, batch[0], batch[-1], total_so_far,
+                )
+                if last_in_batch is not None:
+                    break
+                page += max_workers
+
+        result: list = []
+        for p in sorted(page_data.keys()):
+            result.extend(page_data[p])
+        return result
 
     # ------------------------------------------------------------------
     # Custom fields helpers
@@ -592,28 +658,44 @@ class AmoCRMClient:
         for i, pid in enumerate(pipeline_ids):
             pipeline_params[f"filter[pipeline_id][{i}]"] = pid
 
-        # ── PROBE: try the date filter — fetch just 1 page and check if it works ──
+        # ── Load cache early — needed to decide whether to probe ─────────────
+        cache = _load_subscription_cache()
+        last_sync: float = cache.get("_last_sync", 0.0)
+        leads_cache: dict = cache.get("leads", {})
+        cache_age_days = (time.time() - last_sync) / 86400
+        cached_filter_works: Optional[bool] = cache.get("_filter_works")
+
+        # ── PROBE: try the date filter (skip if we already know it doesn't work) ──
         # If AmoCRM has "API filtering" enabled on field end_date_field_id,
         # the probe will return only leads with matching dates (high match ratio).
         # If the filter is ignored, the probe returns random leads (ratio ≈ 0).
+        # We cache the probe result in subscription_cache.json to avoid the extra
+        # API call on every run when the filter is known to be broken.
         date_params = {
             **pipeline_params,
             f"filter[cf][{end_date_field_id}][from]": day_start,
             f"filter[cf][{end_date_field_id}][to]":   day_end,
         }
-        probe = self._paginate("/leads", date_params, max_pages=1)
-        matching_in_probe = sum(
-            1 for lead in probe
-            if self._field_matches_date(
-                self._get_custom_field_value(lead, end_date_field_id),
-                day_start, day_end,
+        if cached_filter_works is False and leads_cache and cache_age_days <= SUBSCRIPTION_CACHE_MAX_AGE_DAYS:
+            filter_works = False
+            logger.info(
+                "count_expires: skipping probe (cached filter_works=False, cache age=%.1f days, %d leads)",
+                cache_age_days, len(leads_cache),
             )
-        )
-        filter_works = len(probe) > 0 and (matching_in_probe / len(probe)) >= 0.5
-        logger.info(
-            "count_expires: probe %d leads, %d match date → filter_works=%s",
-            len(probe), matching_in_probe, filter_works,
-        )
+        else:
+            probe = self._paginate("/leads", date_params, max_pages=1)
+            matching_in_probe = sum(
+                1 for lead in probe
+                if self._field_matches_date(
+                    self._get_custom_field_value(lead, end_date_field_id),
+                    day_start, day_end,
+                )
+            )
+            filter_works = len(probe) > 0 and (matching_in_probe / len(probe)) >= 0.5
+            logger.info(
+                "count_expires: probe %d leads, %d match date → filter_works=%s",
+                len(probe), matching_in_probe, filter_works,
+            )
 
         if filter_works:
             # ── Fast path: AmoCRM date filter is enabled → fetch only matching leads ──
@@ -654,17 +736,12 @@ class AmoCRMClient:
             return count
 
         # ── Slow path: date filter ignored by AmoCRM → use local cache ───────
-        cache = _load_subscription_cache()
-        last_sync: float = cache.get("_last_sync", 0.0)
-        leads_cache: dict = cache.get("leads", {})
-        cache_age_days = (time.time() - last_sync) / 86400
-
         if cache_age_days > SUBSCRIPTION_CACHE_MAX_AGE_DAYS or not leads_cache:
             logger.info(
-                "count_expires: full cache sync (age=%.1f days, %d leads cached)",
+                "count_expires: full cache sync (age=%.1f days, %d leads cached) — parallel fetch",
                 cache_age_days, len(leads_cache),
             )
-            all_leads = self._paginate("/leads", pipeline_params)
+            all_leads = self._paginate_parallel("/leads", pipeline_params)
             leads_cache = {}
             for lead in all_leads:
                 leads_cache[str(lead["id"])] = {
@@ -688,7 +765,7 @@ class AmoCRMClient:
                 len(updated_leads), len(leads_cache),
             )
 
-        _save_subscription_cache({"_last_sync": time.time(), "leads": leads_cache})
+        _save_subscription_cache({"_last_sync": time.time(), "_filter_works": False, "leads": leads_cache})
 
         # ── Count from cache ─────────────────────────────────────────────────
         count = 0
