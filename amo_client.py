@@ -195,7 +195,7 @@ class AmoCRMClient:
                 break
             batch = items[key]
             results.extend(batch)
-            logger.debug("_paginate %s page=%d batch=%d total=%d", path, page, len(batch), len(results))
+            logger.info("_paginate %s page=%d batch=%d total=%d", path, page, len(batch), len(results))
             if len(batch) < 250:
                 break
             if max_pages and page >= max_pages:
@@ -302,6 +302,7 @@ class AmoCRMClient:
         updated_at_from: int = None,
         updated_at_to: int = None,
         enum_filters: dict = None,
+        max_pages: int = None,
     ) -> list:
         """
         Fetch leads, optionally filtered by date field and enum custom fields.
@@ -346,7 +347,7 @@ class AmoCRMClient:
                 **base_params,
             }
             try:
-                leads = self._paginate("/leads", params)
+                leads = self._paginate("/leads", params, max_pages=max_pages)
                 logger.info("Date filter '%s' OK — got %d leads", prefix, len(leads))
                 return leads
             except requests.HTTPError as exc:
@@ -519,6 +520,7 @@ class AmoCRMClient:
             date_to=day_end,
             pipeline_ids=pipeline_ids,
             enum_filters={city_field_id: city_enum_id, dept_field_id: dept_enum_id},
+            max_pages=8,
         )
 
         logger.info("count_expires: leads from API = %d, filtering by city/dept/end_date in Python", len(leads))
