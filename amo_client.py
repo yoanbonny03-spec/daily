@@ -525,13 +525,30 @@ class AmoCRMClient:
 
         logger.info("count_expires: leads from API = %d, filtering by city/dept/end_date in Python", len(leads))
         count = 0
+        passed_city = 0
+        passed_dept = 0
+        sample_end_dates = []
         for lead in leads:
-            if self._get_custom_field_enum_id(lead, city_field_id) != city_enum_id:
+            city_val = self._get_custom_field_enum_id(lead, city_field_id)
+            if city_val != city_enum_id:
                 continue
-            if self._get_custom_field_enum_id(lead, dept_field_id) != dept_enum_id:
+            passed_city += 1
+            dept_val = self._get_custom_field_enum_id(lead, dept_field_id)
+            if dept_val != dept_enum_id:
                 continue
+            passed_dept += 1
             end_date = self._get_custom_field_value(lead, end_date_field_id)
+            if len(sample_end_dates) < 5:
+                sample_end_dates.append((lead.get("id"), end_date))
             if self._field_matches_date(end_date, day_start, day_end):
                 count += 1
 
+        logger.info(
+            "count_expires: passed city=%d, passed dept=%d, matched date=%d | day_start=%d day_end=%d",
+            passed_city, passed_dept, count, day_start, day_end,
+        )
+        if sample_end_dates:
+            logger.info("count_expires: sample end_date values (lead_id, raw_value): %s", sample_end_dates)
+        else:
+            logger.warning("count_expires: 0 leads passed city filter — field_id=%d enum_id=%d may not exist in subscription pipelines", city_field_id, city_enum_id)
         return count
