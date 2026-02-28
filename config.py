@@ -57,8 +57,19 @@ def load_config() -> dict:
         # Your AmoCRM subdomain (e.g. "mycompany" for mycompany.amocrm.ru)
         "AMO_DOMAIN": _require("AMO_DOMAIN"),
 
-        # Long-lived access token from AmoCRM OAuth
-        "AMO_ACCESS_TOKEN": _require("AMO_ACCESS_TOKEN"),
+        # OAuth2 credentials — создай интеграцию в AmoCRM:
+        # Настройки → Интеграции → Добавить → API-интеграция
+        "AMO_CLIENT_ID": _require("AMO_CLIENT_ID"),
+        "AMO_CLIENT_SECRET": _require("AMO_CLIENT_SECRET"),
+        "AMO_REDIRECT_URI": _require("AMO_REDIRECT_URI"),
+
+        # Refresh token (долгосрочный, обновляется автоматически и сохраняется в tokens.json)
+        # При первом запуске скопируй из окна "Ключи и токены" в интеграции amoCRM
+        "AMO_REFRESH_TOKEN": _require("AMO_REFRESH_TOKEN"),
+
+        # Access token (опционально — если уже есть, чтобы не делать лишний запрос при старте)
+        # Если не задан — берётся из tokens.json или запрашивается через refresh_token
+        "AMO_ACCESS_TOKEN": _optional("AMO_ACCESS_TOKEN"),
 
         # Custom field IDs — find these via GET /api/v4/leads/custom_fields
         # City field (Город): 879211, Department field (Отдел): 912857

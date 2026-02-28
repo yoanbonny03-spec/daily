@@ -44,7 +44,11 @@ def run_for_date(target_date: date, cfg: dict, dry_run: bool = False) -> None:
     # ---- AmoCRM ----
     amo = AmoCRMClient(
         domain=cfg["AMO_DOMAIN"],
-        access_token=cfg["AMO_ACCESS_TOKEN"],
+        client_id=cfg["AMO_CLIENT_ID"],
+        client_secret=cfg["AMO_CLIENT_SECRET"],
+        redirect_uri=cfg["AMO_REDIRECT_URI"],
+        refresh_token=cfg["AMO_REFRESH_TOKEN"],
+        access_token=cfg.get("AMO_ACCESS_TOKEN"),
     )
 
     # Resolve pipeline IDs by name

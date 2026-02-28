@@ -1,10 +1,17 @@
 """
 AmoCRM API client for fetching sales and lead data.
+
+OAuth2 authentication with automatic token refresh:
+  - On startup loads tokens from tokens.json (if exists)
+  - On 401 response automatically refreshes via refresh_token
+  - Saves updated tokens back to tokens.json after each refresh
 """
 
+import json
 import time
 import logging
 from datetime import datetime, date, timedelta, timezone
+from pathlib import Path
 from typing import Optional
 
 import requests
@@ -13,6 +20,8 @@ logger = logging.getLogger(__name__)
 
 # Astana is UTC+5
 ASTANA_TZ = timezone(timedelta(hours=5))
+
+TOKENS_FILE = Path(__file__).parent / "tokens.json"
 
 
 def _day_bounds_astana(target_date: date) -> tuple[int, int]:
@@ -27,24 +36,90 @@ def _day_bounds_astana(target_date: date) -> tuple[int, int]:
     return day_start, day_end
 
 
+def _load_tokens() -> dict:
+    """Load saved tokens from tokens.json."""
+    if TOKENS_FILE.exists():
+        try:
+            return json.loads(TOKENS_FILE.read_text())
+        except Exception:
+            pass
+    return {}
+
+
+def _save_tokens(tokens: dict) -> None:
+    """Persist tokens to tokens.json."""
+    TOKENS_FILE.write_text(json.dumps(tokens, indent=2))
+    logger.debug("Tokens saved to %s", TOKENS_FILE)
+
+
 class AmoCRMClient:
-    """Client for AmoCRM REST API v4."""
+    """Client for AmoCRM REST API v4 with OAuth2 token auto-refresh."""
 
-    def __init__(self, domain: str, access_token: str):
+    def __init__(
+        self,
+        domain: str,
+        client_id: str,
+        client_secret: str,
+        redirect_uri: str,
+        refresh_token: str,
+        access_token: str = None,
+    ):
+        self.domain = domain
         self.base_url = f"https://{domain}.amocrm.ru/api/v4"
-        self._access_token = access_token
-        self.session = requests.Session()
-        self.session.headers.update({
-            "Authorization": f"Bearer {access_token}",
-            "Content-Type": "application/json",
-        })
+        self._oauth_url = f"https://{domain}.amocrm.ru/oauth2/access_token"
+        self._client_id = client_id
+        self._client_secret = client_secret
+        self._redirect_uri = redirect_uri
 
-    def _new_session(self):
+        # Prefer saved tokens, fall back to env vars
+        saved = _load_tokens()
+        self._access_token = saved.get("access_token") or access_token
+        self._refresh_token = saved.get("refresh_token") or refresh_token
+
+        if not self._access_token:
+            logger.info("No access_token found, refreshing via refresh_token...")
+            self._refresh()
+        else:
+            self._build_session()
+
+    def _build_session(self) -> None:
         self.session = requests.Session()
         self.session.headers.update({
             "Authorization": f"Bearer {self._access_token}",
             "Content-Type": "application/json",
         })
+
+    def _refresh(self) -> None:
+        """Exchange refresh_token for a new access_token + refresh_token."""
+        logger.info("Refreshing AmoCRM access token...")
+        resp = requests.post(
+            self._oauth_url,
+            json={
+                "client_id": self._client_id,
+                "client_secret": self._client_secret,
+                "grant_type": "refresh_token",
+                "refresh_token": self._refresh_token,
+                "redirect_uri": self._redirect_uri,
+            },
+            timeout=30,
+        )
+        if not resp.ok:
+            logger.error("Token refresh failed %d: %s", resp.status_code, resp.text[:500])
+            resp.raise_for_status()
+
+        data = resp.json()
+        self._access_token = data["access_token"]
+        self._refresh_token = data["refresh_token"]
+
+        _save_tokens({
+            "access_token": self._access_token,
+            "refresh_token": self._refresh_token,
+        })
+        logger.info("Access token refreshed successfully.")
+        self._build_session()
+
+    def _new_session(self) -> None:
+        self._build_session()
 
     def _get(self, path: str, params: dict = None) -> dict:
         """
@@ -73,6 +148,11 @@ class AmoCRMClient:
                     self._new_session()
                 else:
                     raise
+
+        if resp.status_code == 401:
+            logger.warning("Got 401, refreshing token and retrying...")
+            self._refresh()
+            resp = self.session.get(full_url, timeout=30)
 
         if resp.status_code == 429:
             retry_after = int(resp.headers.get("Retry-After", 5))
