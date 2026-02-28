@@ -68,6 +68,11 @@ class ThreadedHTTPServer(socketserver.ThreadingMixIn, HTTPServer):
     daemon_threads = True
 
 
+# Global lock: only one main.py run at a time.
+# Prevents duplicate syncs when the user clicks Run twice or Railway fires two workers.
+_run_lock = threading.Lock()
+
+
 def _run_script(args: list, timeout: int = 180) -> tuple:
     """Run a Python script as subprocess, streaming output to Railway logs in real time."""
     script_dir = os.path.dirname(os.path.abspath(__file__))
@@ -124,11 +129,18 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/fields":
                 output_text, rc = _run_script(["helper_find_field_ids.py"], timeout=30)
             else:
-                run_date = params.get("date", [""])[0].strip()
-                script_args = ["main.py"]
-                if run_date:
-                    script_args += ["--date", run_date]
-                output_text, rc = _run_script(script_args, timeout=600)
+                if not _run_lock.acquire(blocking=False):
+                    output_text = "⏳ Отчёт уже выполняется. Подождите и обновите страницу."
+                    rc = 0
+                else:
+                    try:
+                        run_date = params.get("date", [""])[0].strip()
+                        script_args = ["main.py"]
+                        if run_date:
+                            script_args += ["--date", run_date]
+                        output_text, rc = _run_script(script_args, timeout=600)
+                    finally:
+                        _run_lock.release()
 
             css = "ok" if rc == 0 else "err"
             output_block = f'<pre class="{css}">{html.escape(output_text)}</pre>'

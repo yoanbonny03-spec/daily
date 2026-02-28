@@ -592,14 +592,74 @@ class AmoCRMClient:
         for i, pid in enumerate(pipeline_ids):
             pipeline_params[f"filter[pipeline_id][{i}]"] = pid
 
-        # ── Load cache ───────────────────────────────────────────────────────
+        # ── PROBE: try the date filter — fetch just 1 page and check if it works ──
+        # If AmoCRM has "API filtering" enabled on field end_date_field_id,
+        # the probe will return only leads with matching dates (high match ratio).
+        # If the filter is ignored, the probe returns random leads (ratio ≈ 0).
+        date_params = {
+            **pipeline_params,
+            f"filter[cf][{end_date_field_id}][from]": day_start,
+            f"filter[cf][{end_date_field_id}][to]":   day_end,
+        }
+        probe = self._paginate("/leads", date_params, max_pages=1)
+        matching_in_probe = sum(
+            1 for lead in probe
+            if self._field_matches_date(
+                self._get_custom_field_value(lead, end_date_field_id),
+                day_start, day_end,
+            )
+        )
+        filter_works = len(probe) > 0 and (matching_in_probe / len(probe)) >= 0.5
+        logger.info(
+            "count_expires: probe %d leads, %d match date → filter_works=%s",
+            len(probe), matching_in_probe, filter_works,
+        )
+
+        if filter_works:
+            # ── Fast path: AmoCRM date filter is enabled → fetch only matching leads ──
+            all_filtered = self._paginate("/leads", date_params)
+            logger.info("count_expires: fast path, %d leads from date filter", len(all_filtered))
+            count = 0
+            count_date_only = 0
+            passed_city = 0
+            passed_dept = 0
+            sample_matches: list = []
+            for lead in all_filtered:
+                end_date = self._get_custom_field_value(lead, end_date_field_id)
+                date_ok = self._field_matches_date(end_date, day_start, day_end)
+                if date_ok:
+                    count_date_only += 1
+                if self._get_custom_field_enum_id(lead, city_field_id) != city_enum_id:
+                    continue
+                passed_city += 1
+                if self._get_custom_field_enum_id(lead, dept_field_id) != dept_enum_id:
+                    continue
+                passed_dept += 1
+                if date_ok:
+                    count += 1
+                    if len(sample_matches) < 5:
+                        sample_matches.append((lead.get("id"), end_date))
+            logger.info(
+                "count_expires: date=%s date_only=%d | city=%d dept=%d | matched=%d",
+                target_date, count_date_only, passed_city, passed_dept, count,
+            )
+            if sample_matches:
+                logger.info("count_expires: sample matches: %s", sample_matches)
+            if count == 0 and count_date_only > 0:
+                logger.warning(
+                    "count_expires: city/dept filter returned 0 but date matched %d — fallback",
+                    count_date_only,
+                )
+                return count_date_only
+            return count
+
+        # ── Slow path: date filter ignored by AmoCRM → use local cache ───────
         cache = _load_subscription_cache()
         last_sync: float = cache.get("_last_sync", 0.0)
         leads_cache: dict = cache.get("leads", {})
         cache_age_days = (time.time() - last_sync) / 86400
 
         if cache_age_days > SUBSCRIPTION_CACHE_MAX_AGE_DAYS or not leads_cache:
-            # ── Full sync ────────────────────────────────────────────────────
             logger.info(
                 "count_expires: full cache sync (age=%.1f days, %d leads cached)",
                 cache_age_days, len(leads_cache),
@@ -614,8 +674,6 @@ class AmoCRMClient:
                 }
             logger.info("count_expires: full sync done, %d leads cached", len(leads_cache))
         else:
-            # ── Incremental sync: only leads updated since last sync ──────────
-            # Subtract 1 hour buffer to avoid missing leads at boundary.
             updated_from = int(last_sync) - 3600
             inc_params = {**pipeline_params, "filter[updated_at][from]": updated_from}
             updated_leads = self._paginate("/leads", inc_params)
@@ -630,7 +688,6 @@ class AmoCRMClient:
                 len(updated_leads), len(leads_cache),
             )
 
-        # ── Persist updated cache ────────────────────────────────────────────
         _save_subscription_cache({"_last_sync": time.time(), "leads": leads_cache})
 
         # ── Count from cache ─────────────────────────────────────────────────
