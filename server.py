@@ -128,7 +128,7 @@ class Handler(BaseHTTPRequestHandler):
                 script_args = ["main.py"]
                 if run_date:
                     script_args += ["--date", run_date]
-                output_text, rc = _run_script(script_args, timeout=180)
+                output_text, rc = _run_script(script_args, timeout=600)
 
             css = "ok" if rc == 0 else "err"
             output_block = f'<pre class="{css}">{html.escape(output_text)}</pre>'

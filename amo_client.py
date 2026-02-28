@@ -305,6 +305,25 @@ class AmoCRMClient:
                 params[f"filter[statuses][{i}][status_id]"] = sid
         return self._paginate("/leads", params)
 
+    def get_leads_by_pipeline_and_enum(
+        self,
+        pipeline_ids: list[int],
+        enum_filters: dict = None,
+    ) -> list:
+        """
+        Fetch all leads filtered by pipeline + optional enum custom fields.
+        Used when AmoCRM ignores date field filters (e.g. field 89203 in
+        subscription pipelines) — date matching is done in Python instead.
+        """
+        params: dict = {}
+        if pipeline_ids:
+            for i, pid in enumerate(pipeline_ids):
+                params[f"filter[pipeline_id][{i}]"] = pid
+        if enum_filters:
+            for cf_id, enum_id in enum_filters.items():
+                params[f"filter[cf][{cf_id}][]"] = enum_id
+        return self._paginate("/leads", params)
+
     def get_leads_by_date_field(
         self,
         field_id: int,
@@ -544,18 +563,13 @@ class AmoCRMClient:
         Дата окончания проверяется в Python.
         """
         day_start, day_end = _day_bounds_astana(target_date)
-        month_start, month_end = _month_bounds_astana(target_date)
-        logger.info("count_expires: date=%s, pipeline_ids=%s", target_date, pipeline_ids)
-        logger.info("count_expires: API filter month range [%d, %d], exact day [%d, %d]",
-                    month_start, month_end, day_start, day_end)
+        logger.info("count_expires: date=%s, pipeline_ids=%s, day=[%d, %d]",
+                    target_date, pipeline_ids, day_start, day_end)
 
-        # Use full-month range for the API date filter: AmoCRM may ignore a narrow
-        # 24-hour window but respect a monthly range. City/dept enum filters further
-        # reduce the result set. Python then matches the exact target date.
-        leads = self.get_leads_by_date_field(
-            field_id=end_date_field_id,
-            date_from=month_start,
-            date_to=month_end,
+        # AmoCRM ignores filter[cf][89203] for subscription pipelines — the API
+        # returns all leads regardless of date range. So we fetch by pipeline +
+        # city/dept enum filters only, then match the target date in Python.
+        leads = self.get_leads_by_pipeline_and_enum(
             pipeline_ids=pipeline_ids,
             enum_filters={city_field_id: city_enum_id, dept_field_id: dept_enum_id},
         )
