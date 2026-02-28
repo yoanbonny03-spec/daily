@@ -22,7 +22,7 @@ SCOPES = [
 
 # Column indices (0-based) in payment employee sheets
 PAYMENT_TYPE_COL = 5   # Column F
-PAYMENT_DATE_COL = 8   # Column I
+PAYMENT_DATE_COL = 9   # Column J
 PAYMENT_TYPE_VALUE = "Повторные продажи"
 
 KASPI_TYPE_COL   = 6   # Column G  — "Рассрочка"
