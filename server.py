@@ -6,10 +6,12 @@ Open the Railway public URL in a browser, pick a date, click Run.
 
 import html
 import os
+import schedule
 import socketserver
 import subprocess
 import sys
 import threading
+import time
 from datetime import date, timedelta
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from urllib.parse import parse_qs
@@ -162,10 +164,42 @@ class Handler(BaseHTTPRequestHandler):
         print(f"[HTTP] {self.address_string()} - {fmt % args}", flush=True)
 
 
+def _scheduler_thread():
+    """Background thread: daily report at 10:00 Astana (05:00 UTC) + cache warm-up every 6h."""
+
+    def _daily_job():
+        print("[scheduler] Starting daily report job", flush=True)
+        with _run_lock:
+            output, rc = _run_script(["main.py"], timeout=600)
+        status = "OK" if rc == 0 else f"FAILED (rc={rc})"
+        print(f"[scheduler] Daily report done: {status}", flush=True)
+
+    def _cache_job():
+        print("[scheduler] Starting cache refresh", flush=True)
+        _run_script(["main.py", "--cache-refresh"], timeout=300)
+        print("[scheduler] Cache refresh done", flush=True)
+
+    # Astana is UTC+5 → 10:00 Astana = 05:00 UTC
+    schedule.every().day.at("05:00").do(_daily_job)
+    schedule.every(6).hours.do(_cache_job)
+
+    # Warm up cache immediately so the first daily job is fast
+    _cache_job()
+
+    while True:
+        schedule.run_pending()
+        time.sleep(30)
+
+
 if __name__ == "__main__":
     import traceback
     port = int(os.environ.get("PORT", 8080))
     try:
+        # Start background scheduler before serving HTTP
+        t = threading.Thread(target=_scheduler_thread, daemon=True, name="scheduler")
+        t.start()
+        print("[scheduler] Background scheduler started (daily at 05:00 UTC / 10:00 Astana)", flush=True)
+
         srv = ThreadedHTTPServer(("0.0.0.0", port), Handler)
         print(f"Server running on http://0.0.0.0:{port}", flush=True)
         sys.stdout.flush()

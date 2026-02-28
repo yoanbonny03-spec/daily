@@ -251,6 +251,11 @@ def main() -> None:
         action="store_true",
         help="Fetch and print data without writing to Google Sheets",
     )
+    parser.add_argument(
+        "--cache-refresh",
+        action="store_true",
+        help="Refresh subscription cache only (no report, no Sheets write)",
+    )
     args = parser.parse_args()
 
     cfg = load_config()
@@ -264,6 +269,8 @@ def main() -> None:
         while True:
             schedule.run_pending()
             time.sleep(30)
+    elif args.cache_refresh:
+        cache_refresh_job(cfg)
     else:
         if args.date:
             try:
