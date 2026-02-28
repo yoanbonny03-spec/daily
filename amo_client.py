@@ -26,6 +26,25 @@ ASTANA_TZ = timezone(timedelta(hours=5))
 
 TOKENS_FILE = Path(__file__).parent / "tokens.json"
 
+# Local cache for subscription pipeline leads.
+# Stores {str(lead_id): {"end_date": ts|None, "city": enum_id|None, "dept": enum_id|None}}
+# so daily runs only fetch leads updated since the last sync.
+SUBSCRIPTION_CACHE_FILE = Path(__file__).parent / "subscription_cache.json"
+SUBSCRIPTION_CACHE_MAX_AGE_DAYS = 7  # force full resync after this many days
+
+
+def _load_subscription_cache() -> dict:
+    if SUBSCRIPTION_CACHE_FILE.exists():
+        try:
+            return json.loads(SUBSCRIPTION_CACHE_FILE.read_text())
+        except Exception:
+            pass
+    return {}
+
+
+def _save_subscription_cache(cache: dict) -> None:
+    SUBSCRIPTION_CACHE_FILE.write_text(json.dumps(cache))
+
 
 def _day_bounds_astana(target_date: date) -> tuple[int, int]:
     """
@@ -559,69 +578,100 @@ class AmoCRMClient:
         Count active leads where дата_окончания_занятий = target_date,
         город=Астана, отдел=Offline.
 
-        Диагностика подтвердила: field_id=879211 (Город), 912857 (Отдел),
-        89203 (Дата окончания занятии) — все присутствуют в subscription лидах.
-        AmoCRM игнорирует filter[cf][89203] для этих воронок → качаем все ~28k
-        лидов по pipeline_id и фильтруем в Python (~300 сек, укладывается в 600).
+        Использует локальный кеш subscription_cache.json:
+          - Первый запуск (или раз в 7 дней): полный fetch всех ~28k лидов.
+          - Последующие запуски: только лиды с updated_at >= последней синхронизации
+            (filter[updated_at][from] работает, это системное поле AmoCRM).
+            Обычно 50-300 лидов = 1-2 страницы = секунды.
+        Подсчёт выполняется из кеша в памяти.
         """
         day_start, day_end = _day_bounds_astana(target_date)
-        logger.info("count_expires: date=%s, pipeline_ids=%s, day=[%d, %d]",
-                    target_date, pipeline_ids, day_start, day_end)
 
-        # AmoCRM ignores filter[cf][89203][from/to] for subscription pipelines.
-        # Enum filter format filter[cf][field_id]=enum_id (without []) is tried
-        # here as a speculative API-level reduction; Python is the authoritative filter.
-        params: dict = {}
+        # ── Build base pipeline params ───────────────────────────────────────
+        pipeline_params: dict = {}
         for i, pid in enumerate(pipeline_ids):
-            params[f"filter[pipeline_id][{i}]"] = pid
-        # Try enum filter without [] brackets (different from the previously-tried [] format)
-        params[f"filter[cf][{city_field_id}]"] = city_enum_id
-        params[f"filter[cf][{dept_field_id}]"] = dept_enum_id
-        leads = self._paginate("/leads", params)
+            pipeline_params[f"filter[pipeline_id][{i}]"] = pid
 
-        logger.info("count_expires: leads from API = %d", len(leads))
+        # ── Load cache ───────────────────────────────────────────────────────
+        cache = _load_subscription_cache()
+        last_sync: float = cache.get("_last_sync", 0.0)
+        leads_cache: dict = cache.get("leads", {})
+        cache_age_days = (time.time() - last_sync) / 86400
 
+        if cache_age_days > SUBSCRIPTION_CACHE_MAX_AGE_DAYS or not leads_cache:
+            # ── Full sync ────────────────────────────────────────────────────
+            logger.info(
+                "count_expires: full cache sync (age=%.1f days, %d leads cached)",
+                cache_age_days, len(leads_cache),
+            )
+            all_leads = self._paginate("/leads", pipeline_params)
+            leads_cache = {}
+            for lead in all_leads:
+                leads_cache[str(lead["id"])] = {
+                    "end_date": self._get_custom_field_value(lead, end_date_field_id),
+                    "city":     self._get_custom_field_enum_id(lead, city_field_id),
+                    "dept":     self._get_custom_field_enum_id(lead, dept_field_id),
+                }
+            logger.info("count_expires: full sync done, %d leads cached", len(leads_cache))
+        else:
+            # ── Incremental sync: only leads updated since last sync ──────────
+            # Subtract 1 hour buffer to avoid missing leads at boundary.
+            updated_from = int(last_sync) - 3600
+            inc_params = {**pipeline_params, "filter[updated_at][from]": updated_from}
+            updated_leads = self._paginate("/leads", inc_params)
+            for lead in updated_leads:
+                leads_cache[str(lead["id"])] = {
+                    "end_date": self._get_custom_field_value(lead, end_date_field_id),
+                    "city":     self._get_custom_field_enum_id(lead, city_field_id),
+                    "dept":     self._get_custom_field_enum_id(lead, dept_field_id),
+                }
+            logger.info(
+                "count_expires: incremental sync, %d leads updated, %d total cached",
+                len(updated_leads), len(leads_cache),
+            )
+
+        # ── Persist updated cache ────────────────────────────────────────────
+        _save_subscription_cache({"_last_sync": time.time(), "leads": leads_cache})
+
+        # ── Count from cache ─────────────────────────────────────────────────
         count = 0
         count_date_only = 0
         passed_city = 0
         passed_dept = 0
         sample_matches: list = []
 
-        for lead in leads:
-            end_date = self._get_custom_field_value(lead, end_date_field_id)
-            date_ok = self._field_matches_date(end_date, day_start, day_end)
+        for data in leads_cache.values():
+            date_ok = self._field_matches_date(data.get("end_date"), day_start, day_end)
             if date_ok:
                 count_date_only += 1
 
-            city_val = self._get_custom_field_enum_id(lead, city_field_id)
-            if city_val != city_enum_id:
+            if data.get("city") != city_enum_id:
                 continue
             passed_city += 1
 
-            dept_val = self._get_custom_field_enum_id(lead, dept_field_id)
-            if dept_val != dept_enum_id:
+            if data.get("dept") != dept_enum_id:
                 continue
             passed_dept += 1
 
             if date_ok:
                 count += 1
                 if len(sample_matches) < 5:
-                    sample_matches.append((lead.get("id"), end_date))
+                    sample_matches.append(data.get("end_date"))
 
         logger.info(
-            "count_expires: date_only=%d | passed city=%d dept=%d | matched_all=%d",
-            count_date_only, passed_city, passed_dept, count,
+            "count_expires: date=%s date_only=%d | city=%d dept=%d | matched=%d",
+            target_date, count_date_only, passed_city, passed_dept, count,
         )
         if sample_matches:
-            logger.info("count_expires: matched leads (id, end_date_ts): %s", sample_matches)
+            logger.info("count_expires: sample matched end_date timestamps: %s", sample_matches)
 
-        # Safety fallback: if city/dept filter zeroes the result but date did match
-        # some leads, the enum IDs may have changed — return date-only count and warn.
+        # Fallback: if city/dept filter yields 0 but date matched something,
+        # enum IDs may have changed — return date-only count and warn.
         if count == 0 and count_date_only > 0:
             logger.warning(
-                "count_expires: city/dept filter returned 0 but date matched %d leads "
-                "(city_enum=%d dept_enum=%d) — returning date-only count as fallback.",
-                count_date_only, city_enum_id, dept_enum_id,
+                "count_expires: city/dept filter returned 0 (city_enum=%d dept_enum=%d) "
+                "but date matched %d leads — returning date-only count as fallback.",
+                city_enum_id, dept_enum_id, count_date_only,
             )
             return count_date_only
         return count

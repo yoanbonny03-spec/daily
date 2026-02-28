@@ -5,3 +5,5 @@ __pycache__/
 *.log
 .venv/
 venv/
+tokens.json
+subscription_cache.json
