@@ -2,15 +2,15 @@
 Google Sheets client for reading payment data and writing daily report.
 """
 
+import json
 import logging
+import os
+import time
 from datetime import date
 from typing import Optional
 
-import json
-import os
-
 import gspread
-from gspread.exceptions import WorksheetNotFound
+from gspread.exceptions import APIError, WorksheetNotFound
 from google.oauth2.service_account import Credentials
 
 logger = logging.getLogger(__name__)
@@ -49,6 +49,29 @@ NON_EMPLOYEE_SHEETS = {
 }
 
 
+# ---------------------------------------------------------------------------
+# Retry helper
+# ---------------------------------------------------------------------------
+
+def _retry(fn, *args, max_retries: int = 5, **kwargs):
+    """Call fn(*args, **kwargs), retrying on HTTP 429 with exponential backoff."""
+    for attempt in range(max_retries):
+        try:
+            return fn(*args, **kwargs)
+        except APIError as exc:
+            status = getattr(exc.response, "status_code", None)
+            if status == 429:
+                wait = (2 ** attempt) * 5  # 5, 10, 20, 40, 80 s
+                logger.warning(
+                    "Sheets quota 429, retry in %ds (attempt %d/%d)",
+                    wait, attempt + 1, max_retries,
+                )
+                time.sleep(wait)
+            else:
+                raise
+    raise RuntimeError(f"Sheets API: 429 quota exceeded after {max_retries} retries")
+
+
 class SheetsClient:
     """Thin wrapper around gspread for our specific use-cases."""
 
@@ -67,82 +90,54 @@ class SheetsClient:
     # ------------------------------------------------------------------
 
     def _open_spreadsheet(self, spreadsheet_id: str) -> gspread.Spreadsheet:
-        return self.gc.open_by_key(spreadsheet_id)
+        return _retry(self.gc.open_by_key, spreadsheet_id)
 
-    def count_upsales_purchases(self, spreadsheet_id: str, target_date: date) -> int:
-        """
-        Count rows across all employee sheets where:
-          column F == "Повторные продажи"  AND  column I == target_date
+    def get_payment_figures(
+        self, spreadsheet_id: str, target_date: date
+    ) -> tuple[int, float]:
+        """Return (upsales_purchases, kaspi_revenue) in a single pass over employee sheets.
+
+        Reads each employee worksheet exactly once instead of twice.
         """
         ss = self._open_spreadsheet(spreadsheet_id)
         target_str = target_date.strftime("%d.%m.%Y")
-        total = 0
+        upsales_count = 0
+        kaspi_total = 0.0
 
-        for ws in ss.worksheets():
+        for ws in _retry(ss.worksheets):
             if ws.title in NON_EMPLOYEE_SHEETS:
                 continue
-
             try:
-                all_values = ws.get_all_values()
+                all_values = _retry(ws.get_all_values)
             except Exception as exc:
                 logger.warning("Could not read sheet %s: %s", ws.title, exc)
                 continue
 
-            # Skip header row (index 0)
-            for row in all_values[1:]:
+            for row in all_values[1:]:  # skip header
                 if len(row) <= PAYMENT_DATE_COL:
                     continue
-                payment_type = row[PAYMENT_TYPE_COL].strip()
                 payment_date = row[PAYMENT_DATE_COL].strip()
-                if payment_type == PAYMENT_TYPE_VALUE and payment_date == target_str:
-                    total += 1
-
-        logger.info("Upsales purchases on %s: %d", target_date, total)
-        return total
-
-    def get_kaspi_revenue(self, spreadsheet_id: str, target_date: date) -> float:
-        """
-        Sum column B across all employee sheets where:
-          column G == "Рассрочка"  AND  column J == target_date
-        """
-        ss = self._open_spreadsheet(spreadsheet_id)
-        target_str = target_date.strftime("%d.%m.%Y")
-        total = 0.0
-
-        for ws in ss.worksheets():
-            if ws.title in NON_EMPLOYEE_SHEETS:
-                continue
-
-            try:
-                all_values = ws.get_all_values()
-            except Exception as exc:
-                logger.warning("Could not read sheet %s: %s", ws.title, exc)
-                continue
-
-            sheet_sum = 0.0
-            for row in all_values[1:]:
-                if len(row) <= KASPI_DATE_COL:
+                if payment_date != target_str:
                     continue
-                kaspi_type = row[KASPI_TYPE_COL].strip()
-                payment_date = row[KASPI_DATE_COL].strip()
-                if kaspi_type == KASPI_TYPE_VALUE and payment_date == target_str:
-                    sheet_sum += self._parse_number(row[KASPI_AMOUNT_COL])
-            if sheet_sum:
-                logger.debug("Sheet %s kaspi revenue: %.2f", ws.title, sheet_sum)
-            total += sheet_sum
+                # Upsales purchase
+                if row[PAYMENT_TYPE_COL].strip() == PAYMENT_TYPE_VALUE:
+                    upsales_count += 1
+                # Kaspi revenue
+                if row[KASPI_TYPE_COL].strip() == KASPI_TYPE_VALUE:
+                    kaspi_total += self._parse_number(row[KASPI_AMOUNT_COL])
 
-        logger.info("Kaspi revenue on %s: %.2f", target_date, total)
-        return total
+        logger.info("Upsales purchases on %s: %d", target_date, upsales_count)
+        logger.info("Kaspi revenue on %s: %.2f", target_date, kaspi_total)
+        return upsales_count, kaspi_total
 
     # ------------------------------------------------------------------
     # Weekly plan sheet helpers
     # ------------------------------------------------------------------
 
     def _set_date_range(self, ws: gspread.Worksheet, target_date: date) -> None:
-        """Set A2 and B2 to target_date so the sheet recalculates."""
+        """Set A2 and B2 to target_date so the sheet recalculates (single API call)."""
         date_str = target_date.strftime("%d.%m.%Y")
-        ws.update(f"{DATE_FROM_COL}2", [[date_str]])
-        ws.update(f"{DATE_TO_COL}2", [[date_str]])
+        _retry(ws.update, "A2:B2", [[date_str, date_str]])
         logger.debug("Set date range A2:B2 to %s", date_str)
 
     @staticmethod
@@ -159,38 +154,48 @@ class SheetsClient:
             logger.warning("Could not parse number from: %r", value)
             return 0.0
 
-    def get_new_sales_revenue(self, spreadsheet_id: str, target_date: date, sheet_name: str = "План еженедельный") -> float:
-        """
-        Set date in the weekly plan sheet, then return D47 + D48.
+    def get_revenue_figures(
+        self,
+        spreadsheet_id: str,
+        target_date: date,
+        sheet_name: str = "План еженедельный",
+    ) -> tuple[float, float]:
+        """Return (new_sales_revenue, upsales_revenue) in a single spreadsheet session.
+
+        Opens the worksheet once, sets the date once (A2:B2), and reads D47:D50 in one call.
         """
         ss = self._open_spreadsheet(spreadsheet_id)
         try:
-            ws = ss.worksheet(sheet_name)
+            ws = _retry(ss.worksheet, sheet_name)
         except WorksheetNotFound:
-            available = [w.title for w in ss.worksheets()]
-            logger.error("Sheet %r not found. Available sheets: %s", sheet_name, available)
+            available = [w.title for w in _retry(ss.worksheets)]
+            logger.error("Sheet %r not found. Available: %s", sheet_name, available)
             raise
+
         self._set_date_range(ws, target_date)
 
-        d47 = self._parse_number(ws.acell(f"{REVENUE_COL}{NEW_SALES_REV_ROW_START}").value)
-        d48 = self._parse_number(ws.acell(f"{REVENUE_COL}{NEW_SALES_REV_ROW_END}").value)
-        total = d47 + d48
-        logger.info("New sales revenue on %s: %.2f (D47=%.2f, D48=%.2f)", target_date, total, d47, d48)
-        return total
+        # Read D47:D50 in one request
+        raw = _retry(ws.get_values, f"D{NEW_SALES_REV_ROW_START}:D{UPSALES_REV_ROW_END}")
+        # raw is [[d47], [d48], [d49], [d50]]  (may be shorter if cells are empty)
+        def _cell(row_idx: int) -> float:
+            try:
+                return self._parse_number(raw[row_idx][0])
+            except (IndexError, TypeError):
+                return 0.0
 
-    def get_upsales_revenue(self, spreadsheet_id: str, target_date: date, sheet_name: str = "План еженедельный") -> float:
-        """
-        Set date in the weekly plan sheet, then return D49 + D50.
-        """
-        ss = self._open_spreadsheet(spreadsheet_id)
-        ws = ss.worksheet(sheet_name)
-        self._set_date_range(ws, target_date)
+        d47, d48, d49, d50 = _cell(0), _cell(1), _cell(2), _cell(3)
+        new_sales_rev = d47 + d48
+        upsales_rev   = d49 + d50
 
-        d49 = self._parse_number(ws.acell(f"{REVENUE_COL}{UPSALES_REV_ROW_START}").value)
-        d50 = self._parse_number(ws.acell(f"{REVENUE_COL}{UPSALES_REV_ROW_END}").value)
-        total = d49 + d50
-        logger.info("Upsales revenue on %s: %.2f (D49=%.2f, D50=%.2f)", target_date, total, d49, d50)
-        return total
+        logger.info(
+            "New sales revenue on %s: %.2f (D47=%.2f, D48=%.2f)",
+            target_date, new_sales_rev, d47, d48,
+        )
+        logger.info(
+            "Upsales revenue on %s: %.2f (D49=%.2f, D50=%.2f)",
+            target_date, upsales_rev, d49, d50,
+        )
+        return new_sales_rev, upsales_rev
 
     # ------------------------------------------------------------------
     # Daily report sheet writer
@@ -214,7 +219,7 @@ class SheetsClient:
     ) -> bool:
         """
         Find the row in the report sheet matching city=Астана and target_date,
-        then write values to columns R-W and Y.
+        then write values to columns R-W and Y in a single batch_update call.
 
         Layout assumed:
           A  = city name
@@ -230,9 +235,9 @@ class SheetsClient:
         Returns True if row was found and updated.
         """
         ss = self._open_spreadsheet(report_spreadsheet_id)
-        ws = ss.worksheet(report_sheet_name)
+        ws = _retry(ss.worksheet, report_sheet_name)
 
-        all_values = ws.get_all_values()
+        all_values = _retry(ws.get_all_values)
 
         # Build possible date strings to match
         date_short = target_date.strftime("%-d.%-m")          # e.g. "25.2"
@@ -258,10 +263,7 @@ class SheetsClient:
                 last_city = city_cell
             date_cell = row[date_col_idx].strip() if len(row) > date_col_idx else ""
 
-            city_matches = last_city == city_value
-            date_matches = date_cell in date_candidates
-
-            if city_matches and date_matches:
+            if last_city == city_value and date_cell in date_candidates:
                 target_row_idx = i
                 break
 
@@ -281,19 +283,19 @@ class SheetsClient:
         # gspread uses 1-based row numbers
         sheet_row = target_row_idx + 1
 
-        updates = [
-            ("R", new_sales_1d3d),
-            ("S", new_sales_total),
-            ("T", expires),
-            ("U", upsales_purch),
-            ("V", new_sales_revenue),
-            ("W", upsales_revenue),
-            ("Y", kaspi_revenue),
-        ]
-
-        for col_letter, value in updates:
-            ws.update(f"{col_letter}{sheet_row}", [[value]])
-            logger.debug("Wrote %s to %s%d", value, col_letter, sheet_row)
+        # Write all 7 columns in a single batch_update (1 API call instead of 7)
+        _retry(
+            ws.batch_update,
+            [
+                {"range": f"R{sheet_row}", "values": [[new_sales_1d3d]]},
+                {"range": f"S{sheet_row}", "values": [[new_sales_total]]},
+                {"range": f"T{sheet_row}", "values": [[expires]]},
+                {"range": f"U{sheet_row}", "values": [[upsales_purch]]},
+                {"range": f"V{sheet_row}", "values": [[new_sales_revenue]]},
+                {"range": f"W{sheet_row}", "values": [[upsales_revenue]]},
+                {"range": f"Y{sheet_row}", "values": [[kaspi_revenue]]},
+            ],
+        )
 
         logger.info(
             "Updated row %d for %s / %s: R=%s S=%s T=%s U=%s V=%s W=%s Y=%s",

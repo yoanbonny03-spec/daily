@@ -122,28 +122,21 @@ def run_for_date(target_date: date, cfg: dict, dry_run: bool = False) -> None:
     sheets = SheetsClient(service_account_file=cfg["GOOGLE_SERVICE_ACCOUNT_FILE"])
 
     payment_spreadsheet_id = cfg["PAYMENT_SPREADSHEET_ID"]
-
-    # 3. Upsales purch (col U)
-    logger.info("--- Шаг 3: подсчёт допродаж из Google Sheets ---")
-    upsales_purch = sheets.count_upsales_purchases(payment_spreadsheet_id, target_date)
-    logger.info("Upsales purch: %d", upsales_purch)
-
     weekly_plan_sheet = cfg.get("WEEKLY_PLAN_SHEET_NAME", "План еженедельный")
 
-    # 4. New sales revenue (col V)
-    logger.info("--- Шаг 4: выручка новых продаж из Google Sheets ---")
-    new_sales_revenue = sheets.get_new_sales_revenue(payment_spreadsheet_id, target_date, weekly_plan_sheet)
-    logger.info("New sales revenue: %.2f", new_sales_revenue)
-
-    # 5. Upsales revenue (col W)
-    logger.info("--- Шаг 5: выручка допродаж из Google Sheets ---")
-    upsales_revenue = sheets.get_upsales_revenue(payment_spreadsheet_id, target_date, weekly_plan_sheet)
-    logger.info("Upsales revenue: %.2f", upsales_revenue)
-
-    # 6. Kaspi revenue (col Y) — sum of payments with G = "Рассрочка"
-    logger.info("--- Шаг 6: Revenue Kaspi (рассрочка) из Google Sheets ---")
-    kaspi_revenue = sheets.get_kaspi_revenue(payment_spreadsheet_id, target_date)
+    # 3+6. Upsales purch (col U) and Kaspi revenue (col Y) — single pass over employee sheets
+    logger.info("--- Шаг 3+6: допродажи и Kaspi из Google Sheets ---")
+    upsales_purch, kaspi_revenue = sheets.get_payment_figures(payment_spreadsheet_id, target_date)
+    logger.info("Upsales purch: %d", upsales_purch)
     logger.info("Kaspi revenue: %.2f", kaspi_revenue)
+
+    # 4+5. New sales revenue (col V) and upsales revenue (col W) — single spreadsheet session
+    logger.info("--- Шаг 4+5: выручка новых продаж и допродаж из Google Sheets ---")
+    new_sales_revenue, upsales_revenue = sheets.get_revenue_figures(
+        payment_spreadsheet_id, target_date, weekly_plan_sheet
+    )
+    logger.info("New sales revenue: %.2f", new_sales_revenue)
+    logger.info("Upsales revenue: %.2f", upsales_revenue)
 
     # ---- Summary ----
     logger.info("========== ИТОГО за %s ==========", target_date.strftime("%d.%m.%Y"))
@@ -161,7 +154,7 @@ def run_for_date(target_date: date, cfg: dict, dry_run: bool = False) -> None:
         return
 
     # ---- Write to daily report ----
-    logger.info("--- Шаг 7: запись в отчётную таблицу ---")
+    logger.info("--- Шаг 5: запись в отчётную таблицу ---")
     ok = sheets.write_daily_report(
         report_spreadsheet_id=cfg["REPORT_SPREADSHEET_ID"],
         report_sheet_name=cfg.get("REPORT_SHEET_NAME", "Февраль заполнение"),
